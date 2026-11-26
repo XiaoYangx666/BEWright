@@ -17,6 +17,7 @@ import { loadBuilding } from '../../content/load.js';
 import { buildingOutputDir } from '../../content/output.js';
 import { buildingArgs, CONTENT_OPTION, PARAM_OPTION, contentOptions, parseTriple, type Triple } from '../args.js';
 import { importLayout } from './import-layout.js';
+import { normalizePlacementIds } from '../../content/world-layout.js';
 
 export const IMPORT_HELP = `bewright import <building> --edition bedrock|java [options]
 bewright import --layout FILE [--only ID ...] [--skip-air] [options]
@@ -35,8 +36,11 @@ bewright import --layout FILE [--only ID ...] [--skip-air] [options]
   --dimension 0|1|2        Bedrock dimension
   --file FILE              place an existing .mcstructure instead of building
   --layout FILE            import an ordered JSON layout into one Overworld
-  --only ID                select a layout placement (repeatable)
+  --only ID[,ID...]        select layout placements (repeatable, comma-separated)
+  --except ID[,ID...]      skip layout placements (repeatable, comma-separated)
   --skip-air               omit explicit air when importing a layout
+  --skip-verify            skip the post-write cell and preservation report
+  --backup-dir DIR         put the pre-write world copy in DIR instead of next to the world
   --dry-run                resolve the destination and placements without writing
   --json                   print machine-readable results
   --report FILE            save a world-write report
@@ -63,7 +67,10 @@ export async function importCommand(argv: string[]) {
       file: { type: 'string' },
       layout: { type: 'string' },
       only: { type: 'string', multiple: true },
+      except: { type: 'string', multiple: true },
       'skip-air': { type: 'boolean' },
+      'skip-verify': { type: 'boolean' },
+      'backup-dir': { type: 'string' },
       'dry-run': { type: 'boolean' },
       force: { type: 'boolean' },
       json: { type: 'boolean' },
@@ -80,9 +87,15 @@ export async function importCommand(argv: string[]) {
     if (positionals.length || values.file !== undefined || values.param || values.origin !== undefined ||
         values.rotation !== undefined || values.dimension !== undefined || values.force)
       throw new Error('--layout defines Overworld placements; use its building, params, origin and rotation fields');
-    return await importLayout({ ...values, edition, layout: values.layout });
+    return await importLayout({
+      ...values,
+      edition,
+      layout: values.layout,
+      only: normalizePlacementIds(values.only),
+      except: normalizePlacementIds(values.except),
+    });
   }
-  if (values.only || values['skip-air']) throw new Error('--only and --skip-air require --layout');
+  if (values.only || values.except || values['skip-air']) throw new Error('--only, --except and --skip-air require --layout');
   const origin = parseTriple(values.origin ?? (values.local ? '0,-60,0' : '0,64,0'), 'origin');
   const rotation = Number(values.rotation ?? '0');
   if (![0, 90, 180, 270].includes(rotation)) throw new Error('--rotation must be 0, 90, 180, or 270');
@@ -250,6 +263,7 @@ export async function importCommand(argv: string[]) {
             dimension,
             rotation: rotation as 0 | 90 | 180 | 270,
             backup: Boolean(values.world),
+            backupDir: values['backup-dir'],
           })
         : await writeStructureToWorld(world!, placement.region!, {
             world: destination,
@@ -257,6 +271,7 @@ export async function importCommand(argv: string[]) {
             dimension,
             rotation: rotation as 0 | 90 | 180 | 270,
             backup: Boolean(values.world),
+            backupDir: values['backup-dir'],
           });
       placedBlocks += result.placedBlocks;
       regionCells += result.regionCells;

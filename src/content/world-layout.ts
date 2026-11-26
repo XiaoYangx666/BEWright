@@ -79,12 +79,18 @@ export function findLayoutBuilding(layoutPath: string, reference: string, option
   return findBuilding(source, options);
 }
 
+/** Accept repeatable and comma-separated placement ids (`--only a --only b,c`). */
+export function normalizePlacementIds(values: readonly string[] | undefined) {
+  return [...new Set((values ?? []).flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean))];
+}
+
 export async function composeWorldLayout(
   layout: Awaited<ReturnType<typeof readWorldLayout>>,
-  options: { edition: 'bedrock' | 'java'; content: ContentOptions; only: string[]; skipAir: boolean },
+  options: { edition: 'bedrock' | 'java'; content: ContentOptions; only: string[]; except?: string[]; skipAir: boolean },
 ) {
   const selected = new Set(options.only);
-  for (const id of selected)
+  const excluded = new Set(options.except ?? []);
+  for (const id of [...selected, ...excluded])
     if (!layout.placements.some((placement) => placement.id === id)) throw new Error(`Unknown placement id: ${id}`);
   const world = new Structure();
   const loaded = new Map<string, LoadedBuilding>();
@@ -95,6 +101,7 @@ export async function composeWorldLayout(
   let explicitAir = 0;
   for (const placement of layout.placements) {
     if (selected.size && !selected.has(placement.id)) continue;
+    if (excluded.has(placement.id)) continue;
     const reference = placement.building;
     let source = loaded.get(reference);
     if (!source) {

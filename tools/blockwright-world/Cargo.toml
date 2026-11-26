@@ -5,7 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-bedrock-world = { git = "https://github.com/BE-Community-Dev/bedrock-world.git", branch = "main", default-features = false, features = ["backend-bedrock-leveldb"] }
+# Our fork carries the single-pass region export (upstream is not used).
+bedrock-world = { git = "https://github.com/XiaoYangx666/bedrock-world.git", branch = "main", default-features = false, features = ["backend-bedrock-leveldb"] }
 serde_json = "1"
 indexmap = "2"
 bedrock-leveldb = { version = "0.4.0", git = "https://github.com/BE-Community-Dev/bedrock-leveldb.git", branch = "main", default-features = false, features = ["zlib"] }

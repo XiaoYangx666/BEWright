@@ -95,7 +95,7 @@ dependencies = [
 [[package]]
 name = "bedrock-world"
 version = "0.4.0"
-source = "git+https://github.com/BE-Community-Dev/bedrock-world.git?branch=main#20cc0f47d3827c50ad660a479050956192243b82"
+source = "git+https://github.com/XiaoYangx666/bedrock-world.git?branch=main#4b4f5a8978e2dfbdefbb06e06c769017a5d3c49e"
 dependencies = [
  "bedrock-leveldb",
  "bytes",

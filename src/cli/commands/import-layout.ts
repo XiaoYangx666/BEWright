@@ -8,7 +8,8 @@ import { defaultJavaWorldsDir } from '../../project/config.js';
 import { WORLD_ROOT, atomicWrite, validateWorldFolderName, within } from '../../project/paths.js';
 import { requireSidecar } from '../../project/sidecar.js';
 import { createBedrockWorld, defaultMinecraftWorldsDir, minecraftRunning } from '../../targets/bedrock/create.js';
-import { backupWorld, validateDirectStructure, validateWorldDirectory, writeStructureToWorld } from '../../targets/bedrock/world.js';
+import { comparePreservation, preservationInfo } from '../../targets/bedrock/preserve.js';
+import { analyzeDirectStructureInWorld, backupWorld, validateDirectStructure, validateWorldDirectory, writeStructureToWorld } from '../../targets/bedrock/world.js';
 import { encodeJavaWorld, exportJavaWorld } from '../../targets/java/world.js';
 import { contentOptions, parseTriple } from '../args.js';
 
@@ -24,7 +25,10 @@ type LayoutImportOptions = {
   spawn?: string;
   seed?: string;
   only?: string[];
+  except?: string[];
   'skip-air'?: boolean;
+  'skip-verify'?: boolean;
+  'backup-dir'?: string;
   'dry-run'?: boolean;
   json?: boolean;
   report?: string;
@@ -49,7 +53,11 @@ export async function importLayout(options: LayoutImportOptions) {
 
   const layout = await readWorldLayout(options.layout);
   const model = await composeWorldLayout(layout, {
-    edition, content: contentOptions(options), only: options.only ?? [], skipAir: options['skip-air'] ?? false,
+    edition,
+    content: contentOptions(options),
+    only: options.only ?? [],
+    except: options.except ?? [],
+    skipAir: options['skip-air'] ?? false,
   });
   const name = options['new-world']?.trim() || layout.name.trim();
   const spawn = options.spawn === undefined ? layout.spawn : parseTriple(options.spawn, 'spawn');
@@ -82,12 +90,37 @@ export async function importLayout(options: LayoutImportOptions) {
     validateDirectStructure(world, region);
   }
   const dryRun = Boolean(options['dry-run']);
+  let overwrites;
+  if (existing) {
+    try {
+      const analysis = await analyzeDirectStructureInWorld(world, region, {
+        world: destination,
+        position: region.min,
+      });
+      overwrites = {
+        cells: analysis.cells,
+        matched: analysis.matched,
+        air: analysis.empty,
+        nonAir: analysis.different,
+        byBlock: analysis.byBlock,
+        samples: analysis.samples.map((sample) => ({
+          position: [sample.x, sample.y, sample.z],
+          current: sample.current ?? 'minecraft:air',
+          placed: sample.expected,
+        })),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not read ${destination} before writing (close the server first): ${message}`, { cause: error });
+    }
+  }
   const summary = {
     edition, dryRun, layout: layout.path, world: destination,
     mode: existing ? 'existing-world' : 'new-world',
     name: existing ? (await readFile(join(destination, 'levelname.txt'), 'utf8').catch(() => null))?.trim() ?? null : name,
     spawn: existing ? null : spawn, seed: existing ? null : seed,
     placements: model.placements, bounds: model.bounds, cells: model.cells, explicitAir: model.explicitAir,
+    worldOverwrites: overwrites,
     gameVerified: false,
   };
 
@@ -97,9 +130,9 @@ export async function importLayout(options: LayoutImportOptions) {
     return;
   }
 
-  let report;
+  let report: Record<string, unknown>;
   if (edition === 'java') {
-    report = await exportJavaWorld(world, region, { output: destination, name, spawn, seed });
+    report = { ...(await exportJavaWorld(world, region, { output: destination, name, spawn, seed })) };
   } else {
     const running = !within(WORLD_ROOT, destination) && await minecraftRunning();
     if (running) throw new Error(`${running} is running; close it before importing into ${destination}`);
@@ -108,11 +141,38 @@ export async function importLayout(options: LayoutImportOptions) {
       world: target, position: region.min, backup: false, skipEmptyChunks: true,
     });
     if (existing) {
-      const backupPath = await backupWorld(destination);
+      const preservationBefore = await preservationInfo(destination);
+      const backupPath = await backupWorld(destination, options['backup-dir']);
       try {
         report = { ...await write(destination), backupPath };
       } catch (error) {
         throw new Error(`Writing ${destination} failed. Pre-import backup: ${backupPath}. ${String(error)}`, { cause: error });
+      }
+      if (!options['skip-verify']) {
+        try {
+          const analysis = await analyzeDirectStructureInWorld(world, region, {
+            world: destination,
+            position: region.min,
+          });
+          report.verification = {
+            checked: analysis.cells,
+            matched: analysis.matched,
+            mismatched: analysis.different + analysis.empty,
+            missing: analysis.empty,
+            samples: analysis.samples.map((sample) => ({
+              position: [sample.x, sample.y, sample.z],
+              placed: sample.expected,
+              actual: sample.current,
+            })),
+          };
+        } catch (error) {
+          report.verification = { error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      try {
+        report.preservation = comparePreservation(preservationBefore, await preservationInfo(destination));
+      } catch (error) {
+        report.preservation = { error: error instanceof Error ? error.message : String(error) };
       }
     } else {
       requireSidecar('blockwright-world-init');

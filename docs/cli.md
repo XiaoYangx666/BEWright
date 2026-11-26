@@ -256,6 +256,10 @@ node ./node_modules/bewright/dist/cli/index.js import ../my-arch --local
 | `--spawn x,y,z` | 新世界出生点。Java 默认取建筑声明。Bedrock `--local` 在未旋转且有可用的建筑出生点时换算坐标，否则在平地上从原点向西两格出生。Bedrock 其他模式默认 `0,-60,0` |
 | `--rotation 0\|90\|180\|270` / `--dimension 0\|1\|2` | Bedrock 放置旋转与目标维度；镜像仅公共写入 API 支持，CLI 无 `--mirror` |
 | `--file FILE` | 直接放置已有 `.mcstructure`；sidecar 只接受布局版本 1（v2 文件请用 `--structure-version 1` 重新导出，或改用不带 `--file` 的直接写入） |
+| `--only ID[,ID...]` | 清单模式：只写入选中的放置项，可重复或逗号分隔 |
+| `--except ID[,ID...]` | 清单模式：排除放置项，可与 `--only` 组合 |
+| `--backup-dir DIR` | 写入已有世界前把整档备份到 DIR，默认放在世界同级的父目录 |
+| `--skip-verify` | 跳过写入后的逐格回读与存档保留报告（默认执行） |
 | `--dry-run` | 预演并打印 JSON。单建筑 Bedrock 只解析放置计划，清单模式会生成并校验组合模型 |
 | `--json` | 输出完整写入结果，默认只打印世界路径 |
 | `--report FILE` | 保存写入记录到指定文件 |
@@ -267,7 +271,9 @@ node ./node_modules/bewright/dist/cli/index.js import ../my-arch --local
 
 单建筑 Java 导入保留模型坐标。需要执行建筑 `check()` 时，先对所用建筑运行 `build`。
 
-> 导入**默认不回读**：写入完成后直接进游戏验收。世界表现异常（方块缺失、围栏/墙连接不对等）需要逐格定位时，用 `cache/sidecar/` 下的 sidecar（如 `blockwright-world-export` / `blockwright-world-diagnose`）把区域回读后自行比对；工具不再提供这一层的 CLI 入口。
+> 单建筑导入**默认不回读**：写入完成后直接进游戏验收。世界表现异常（方块缺失、围栏/墙连接不对等）需要逐格定位时，用 `cache/sidecar/` 下的 sidecar（如 `blockwright-world-export` / `blockwright-world-diagnose`）把区域回读后自行比对。
+>
+> 清单模式写入**已有 Bedrock 世界**时默认对比：写入前在 `worldOverwrites` 里列出目标格当前方块与模型不一致的情况（按方块名统计，`matched` 为已经一致的格数，空气不计入覆盖），写入后再给出 `verification`（逐格对比）与 `preservation`（`level.dat` 哈希、玩家记录键）。`--dry-run` 只做前半部分。对比由 `blockwright-world --analyze` 直接读取目标区块完成，不导出 `.mcstructure`；写入前世界必须处于关闭状态。
 
 ### 用清单导入多个建筑
 
@@ -286,7 +292,7 @@ node ./node_modules/bewright/dist/cli/index.js import ../my-arch --local
 ```
 
 - `name` 和 `spawn` 必填，`seed` 默认是 0。新世界可以用 `--new-world`、`--spawn` 和 `--seed` 覆盖这些值。
-- `id` 是清单中唯一的放置名称，可用重复的 `--only ID` 选中多项，仍按清单顺序执行。`building` 可填建筑 ID、相对于清单的建筑目录或 manifest 路径。`params` 可选，格式为 `{"参数名": 值}`。
+- `id` 是清单中唯一的放置名称，可用重复的 `--only ID` 或逗号列表 `--only a,b` 选中多项，仍按清单顺序执行；`--except a,b` 排除放置项。`building` 可填建筑 ID、相对于清单的建筑目录或 manifest 路径。`params` 可选，格式为 `{"参数名": 值}`。
 - `origin` 是旋转后放置边界的最小坐标。x/z 使用 32 位整数，一格为单位。`rotation` 为 0、90、180 或 270，俯视顺时针，默认 0。清单写入主世界，Y 范围为 -64 到 319。Bedrock 使用建筑声明的放置区域，Java 使用建筑的 `bounds`。
 - 后列建筑的已设置格覆盖前列建筑或存档里的对应格。未设置的位置保留原方块，显式空气会清除方块。加 `--skip-air` 可忽略所有显式空气。重新导入会应用当前源码写出的方块，缩小建筑后若要清理旧方块，需在源码中为旧位置明确写入空气。
 
@@ -294,6 +300,7 @@ node ./node_modules/bewright/dist/cli/index.js import ../my-arch --local
 node dist/cli/index.js import --layout tour.json --local --folder tour-test --dry-run
 node dist/cli/index.js import --layout tour.json --local --folder tour-test
 node dist/cli/index.js import --layout tour.json --world worlds/bedrock/tour-test --only east
+node dist/cli/index.js import --layout tour.json --world /path/to/existing --only cafe,promenade,poolrooms --backup-dir /data/backups --dry-run
 node dist/cli/index.js import --layout tour.json --local --folder tour-rebuilt
 node dist/cli/index.js import --layout tour.json --edition java --local --folder tour-java
 ```

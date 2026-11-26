@@ -28,6 +28,7 @@ struct Args {
     world: PathBuf,
     structure: Option<PathBuf>,
     direct_stdin: bool,
+    analyze: bool,
     skip_empty_chunks: bool,
     x: i32,
     y: i32,
@@ -40,7 +41,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks]"
+        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks] [--analyze]"
     );
     process::exit(2);
 }
@@ -53,6 +54,7 @@ fn parse() -> Args {
     let mut world = None;
     let mut structure = None;
     let mut direct_stdin = false;
+    let mut analyze = false;
     let mut skip_empty_chunks = false;
     let (mut x, mut y, mut z, mut dimension) = (None, None, None, 0);
     let mut rotation = McStructureRotation::None;
@@ -64,6 +66,7 @@ fn parse() -> Args {
             "--world" => world = Some(PathBuf::from(value(&mut input))),
             "--structure" => structure = Some(PathBuf::from(value(&mut input))),
             "--direct-stdin" => direct_stdin = true,
+            "--analyze" => analyze = true,
             "--skip-empty-chunks" => skip_empty_chunks = true,
             "--x" => x = value(&mut input).parse().ok(),
             "--y" => y = value(&mut input).parse().ok(),
@@ -86,10 +89,14 @@ fn parse() -> Args {
     if direct_stdin == structure.is_some() {
         usage();
     }
+    if analyze && !direct_stdin {
+        usage();
+    }
     Args {
         world: world.unwrap_or_else(|| usage()),
         structure,
         direct_stdin,
+        analyze,
         skip_empty_chunks,
         x: x.unwrap_or_else(|| usage()),
         y: y.unwrap_or_else(|| usage()),
@@ -271,6 +278,40 @@ fn run(args: Args) -> bedrock_world::Result<()> {
         2 => Dimension::End,
         id => Dimension::Unknown(id),
     };
+    if args.analyze {
+        let Some(payload) = payload.as_mut() else {
+            usage()
+        };
+        if !matches!(args.rotation, McStructureRotation::None) || args.mirror_x || args.mirror_z {
+            usage();
+        }
+        let analysis = direct::analyze(&world, (args.x, args.y, args.z, dimension), payload)?;
+        let samples: Vec<_> = analysis
+            .samples
+            .iter()
+            .map(|sample| {
+                json!({
+                    "x": sample.x,
+                    "y": sample.y,
+                    "z": sample.z,
+                    "expected": sample.expected,
+                    "current": sample.current,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            json!({"ok":true,"analysis":{
+                "cells":analysis.cells,
+                "matched":analysis.matched,
+                "different":analysis.different,
+                "empty":analysis.empty,
+                "byBlock":analysis.by_block,
+                "samples":samples,
+            }})
+        );
+        return Ok(());
+    }
     let guard = WriteGuard::confirmed(&args.world, "place Blockwright structure");
     let outcome = if let Some(payload) = payload.as_mut() {
         let result = direct::write(

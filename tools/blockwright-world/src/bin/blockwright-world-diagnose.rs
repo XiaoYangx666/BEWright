@@ -26,6 +26,21 @@ fn main() {
                 eprintln!("{e}");
                 process::exit(1)
             });
+    if args.iter().any(|arg| arg == "--players") {
+        let mut players: Vec<String> = world
+            .list_players_blocking()
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                process::exit(1)
+            })
+            .iter()
+            .filter_map(|id| id.storage_key())
+            .map(|key| String::from_utf8_lossy(&key).into_owned())
+            .collect();
+        players.sort();
+        println!("{}", json!({"ok": true, "players": players}));
+        return;
+    }
     let mut rows = Vec::new();
     for x in number("--min-x")..number("--max-x") {
         for z in number("--min-z")..number("--max-z") {

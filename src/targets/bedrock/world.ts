@@ -1,4 +1,4 @@
-import { cp, readFile, stat } from 'node:fs/promises';
+import { cp, mkdir, readFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import nbt from 'prismarine-nbt';
@@ -18,6 +18,8 @@ export type WorldPlacement = {
   mirrorX?: boolean;
   mirrorZ?: boolean;
   backup?: boolean;
+  /** Where the pre-write copy goes; defaults to the world's parent directory. */
+  backupDir?: string;
   binary?: string;
 };
 
@@ -68,8 +70,10 @@ function timestamp() {
     .replace(/\.\d{3}Z$/, 'Z');
 }
 
-export async function backupWorld(world: string) {
-  const target = join(dirname(world), `${basename(world)}.blockwright-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
+export async function backupWorld(world: string, directory?: string) {
+  const parent = directory ? resolve(directory) : dirname(world);
+  await mkdir(parent, { recursive: true });
+  const target = join(parent, `${basename(world)}.blockwright-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
   // `cp` creates the destination itself: pre-creating it made every backup of an
   // existing world fail with EEXIST under `errorOnExist`.
   await cp(world, target, { recursive: true, force: false, errorOnExist: true });
@@ -307,6 +311,50 @@ export function countMcstructureCells(bytes: Buffer) {
   return count;
 }
 
+export type DirectAnalysisSample = {
+  x: number;
+  y: number;
+  z: number;
+  expected: string;
+  current: string | null;
+};
+
+export type DirectAnalysis = {
+  cells: number;
+  matched: number;
+  /** Target cell holds a different solid block (or the model clears it). */
+  different: number;
+  /** Target cell is air where the model places a block. */
+  empty: number;
+  byBlock: Record<string, number>;
+  samples: DirectAnalysisSample[];
+};
+
+/**
+ * Compare a model with the target chunks without writing or materializing the
+ * bounding box as an `.mcstructure`. The sidecar walks the same direct payload
+ * the writer consumes, so cost tracks placed cells rather than box volume.
+ */
+export async function analyzeDirectStructureInWorld(
+  structure: Structure,
+  region: Box,
+  options: DirectWorldPlacement,
+): Promise<DirectAnalysis> {
+  const world = await validateWorldDirectory(options.world);
+  assertAligned(options);
+  if (options.rotation || options.mirrorX || options.mirrorZ)
+    throw new Error('Analysis requires an unrotated, unmirrored placement');
+  const binary = worldWriterBinary(options.binary);
+  const payload = directStructureStream(structure, region);
+  const result = await runSidecarJson<{ ok: boolean; analysis: DirectAnalysis }>(
+    binary,
+    placementArgs(options, world, ['--direct-stdin', '--analyze']),
+    'World analyzer',
+    payload.chunks,
+  );
+  return result.analysis;
+}
+
 async function placeDirectStructureInWorld(
   structure: Structure,
   region: Box,
@@ -320,7 +368,7 @@ async function placeDirectStructureInWorld(
   // Planning (palette, block count, header) happens here, before the backup and
   // the spawn; the records are produced lazily as the sidecar drains stdin.
   const payload = directStructureStream(structure, region);
-  const backupPath = options.backup === false ? undefined : await backupWorld(world);
+  const backupPath = options.backup === false ? undefined : await backupWorld(world, options.backupDir);
   const args = placementArgs(options, world, ['--direct-stdin']);
   if (options.skipEmptyChunks) args.push('--skip-empty-chunks');
   const result = await runSidecarJson<WorldWriterReport>(binary, args, 'World writer', payload.chunks);
@@ -340,7 +388,7 @@ export async function placeStructureInWorld(options: WorldPlacement): Promise<Wo
   await requireFile(structure, 'Structure file');
   assertAligned(options);
   const binary = worldWriterBinary(options.binary);
-  const backupPath = options.backup === false ? undefined : await backupWorld(world);
+  const backupPath = options.backup === false ? undefined : await backupWorld(world, options.backupDir);
   const args = placementArgs(options, world, ['--structure', structure]);
   const result = await runSidecarJson<WorldWriterReport>(binary, args, 'World writer');
   const bytes = await readFile(structure);

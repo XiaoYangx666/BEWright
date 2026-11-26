@@ -182,7 +182,7 @@ node dist/cli/index.js <command>
 
 ## sidecar
 
-Rust 程序在 `tools/blockwright-world/`，五个二进制：`blockwright-world`（写入）、`-export`（回读）、`-diagnose`、`-init`（新建世界）、`blockwright-java-export`。全部通过 `src/project/sidecar.ts` 调用，统一处理：
+Rust 程序在 `tools/blockwright-world/`，五个二进制：`blockwright-world`（写入）、`-export`（回读）、`-diagnose`（区块诊断，`--players` 列出玩家记录键）、`-init`（新建世界）、`blockwright-java-export`。全部通过 `src/project/sidecar.ts` 调用，统一处理：
 
 - 二进制从 `BLOCKWRIGHT_BIN_DIR`、工作区或工具安装目录解析。缺失时用 `bewright sidecar build` 构建工具包自带的 Rust 源码。
 - stdin payload、UTF-8 stdout/stderr、非零退出码
@@ -192,7 +192,7 @@ Rust 程序在 `tools/blockwright-world/`，五个二进制：`blockwright-world
 
 单建筑 Bedrock 导入会在创建存档前完成模型生成、墙状态推导、放置锚点和区域内方块状态校验。单建筑 Bedrock dry-run 只解析目标及批次，`--file` 放置先检查文件及锚点。初始化或写入阶段失败可能留下部分存档。
 
-清单导入由 `cli/commands/import-layout.ts` 调度。各实例经坐标与方向状态变换后按清单顺序写入同一个 `Structure`。Bedrock 在组合结果上推导墙连接，再向直接写入器提交方块记录，跳过没有写入格的区块；已有世界写入前备份一次，新世界在临时目录写完后发布。Java 将组合模型交给同一套 Anvil 导出器，目标必须是新目录。清单 dry-run 会生成组合模型并校验目标方块。 [命令与覆盖规则](cli.md#用清单导入多个建筑)
+清单导入由 `cli/commands/import-layout.ts` 调度。各实例经坐标与方向状态变换后按清单顺序写入同一个 `Structure`。Bedrock 在组合结果上推导墙连接，再向直接写入器提交方块记录，跳过没有写入格的区块；已有世界写入前备份一次，并由 `blockwright-world --analyze` 直接读取目标区块：写入前报告不一致的方块，写入后逐格校验，同时对比 `level.dat` 哈希与玩家记录。新世界在临时目录写完后发布。Java 将组合模型交给同一套 Anvil 导出器，目标必须是新目录。清单 dry-run 会生成组合模型并校验目标方块。 [命令与覆盖规则](cli.md#用清单导入多个建筑)
 
 源码打包沿用清单导入的建筑定位规则。打包器读取 manifest 和源码，递归解析入口的本地 ESM 引用，保留工作区相对目录结构，并为包根清单生成新的建筑路径。这个流程无需执行建筑入口或生成体素模型。[源码打包](cli.md#bewright-pack---layout-file)
 

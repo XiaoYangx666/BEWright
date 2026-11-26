@@ -114,6 +114,164 @@ impl<R: Read> Payload<R> {
     }
 }
 
+/// One differing cell in an analysis pass.
+pub struct Sample {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub expected: String,
+    pub current: Option<String>,
+}
+
+/// Result of comparing a direct payload against the target chunks.
+#[derive(Default)]
+pub struct Analysis {
+    pub cells: usize,
+    pub matched: usize,
+    /// Current block is solid but differs from the payload (or is cleared).
+    pub different: usize,
+    /// Payload expects a solid block where the world has air.
+    pub empty: usize,
+    pub by_block: BTreeMap<String, usize>,
+    pub samples: Vec<Sample>,
+}
+
+/// Decoded subchunks for one chunk, parsed lazily once per subchunk.
+struct ChunkView {
+    chunk: Chunk,
+    subchunks: BTreeMap<i8, Option<SubChunk>>,
+}
+
+impl ChunkView {
+    fn state_at(&mut self, x: u8, y: i32, z: u8) -> Result<Option<BlockState>> {
+        let subchunk_y = i8::try_from(y.div_euclid(16))
+            .map_err(|_| BedrockWorldError::Validation("world y is not a subchunk index".into()))?;
+        if !self.subchunks.contains_key(&subchunk_y) {
+            let parsed = self.chunk.get_subchunk(subchunk_y)?;
+            self.subchunks.insert(subchunk_y, parsed);
+        }
+        if let Some(Some(subchunk)) = self.subchunks.get(&subchunk_y) {
+            let local_y = u8::try_from(y.rem_euclid(16)).map_err(|_| {
+                BedrockWorldError::Validation("world y is not a subchunk offset".into())
+            })?;
+            if let Some(state) = subchunk.block_state_at(x, local_y, z) {
+                return Ok(Some(state.clone()));
+            }
+        }
+        match self.chunk.get_block(
+            x,
+            i16::try_from(y)
+                .map_err(|_| BedrockWorldError::Validation("world y does not fit i16".into()))?,
+            z,
+        ) {
+            Ok(state) => Ok(Some(state)),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    bedrock_world::BedrockWorldErrorKind::UnsupportedChunkFormat
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Compares every cell of a direct payload with the target world without writing.
+///
+/// This keeps the read-back proportional to the actual placed cells: the old
+/// `.mcstructure` route materialized and parsed the whole bounding box first.
+pub fn analyze<S: WorldStorageHandle>(
+    world: &BedrockWorld<S>,
+    placement: (i32, i32, i32, Dimension),
+    payload: &mut Payload<impl Read>,
+) -> Result<Analysis> {
+    let (origin_x, origin_y, origin_z, dimension) = placement;
+    let block_count = usize::try_from(payload.reader.u32()?)
+        .map_err(|_| BedrockWorldError::Validation("block count overflowed".into()))?;
+    let mut analysis = Analysis::default();
+    let mut current: Option<(ChunkPos, ChunkView)> = None;
+    for _ in 0..block_count {
+        let x = i32::try_from(payload.reader.u32()?)
+            .map_err(|_| BedrockWorldError::Validation("direct x coordinate overflowed".into()))?;
+        let y = i32::try_from(payload.reader.u32()?)
+            .map_err(|_| BedrockWorldError::Validation("direct y coordinate overflowed".into()))?;
+        let z = i32::try_from(payload.reader.u32()?)
+            .map_err(|_| BedrockWorldError::Validation("direct z coordinate overflowed".into()))?;
+        let palette_index = usize::try_from(payload.reader.u32()?)
+            .map_err(|_| BedrockWorldError::Validation("direct palette index overflowed".into()))?;
+        if palette_index == 0 || palette_index >= payload.palette.len() {
+            return Err(BedrockWorldError::Validation(
+                "direct palette index is out of range".into(),
+            ));
+        }
+        let expected = payload.palette[palette_index].name.clone();
+        let world_x = origin_x
+            .checked_add(x)
+            .ok_or_else(|| BedrockWorldError::Validation("world x overflowed".into()))?;
+        let world_y = origin_y
+            .checked_add(y)
+            .ok_or_else(|| BedrockWorldError::Validation("world y overflowed".into()))?;
+        let world_z = origin_z
+            .checked_add(z)
+            .ok_or_else(|| BedrockWorldError::Validation("world z overflowed".into()))?;
+        let chunk_pos = ChunkPos {
+            x: world_x.div_euclid(16),
+            z: world_z.div_euclid(16),
+            dimension,
+        };
+        if current.as_ref().map(|(pos, _)| *pos) != Some(chunk_pos) {
+            let chunk = world.get_chunk_blocking(chunk_pos)?;
+            current = Some((
+                chunk_pos,
+                ChunkView {
+                    chunk,
+                    subchunks: BTreeMap::new(),
+                },
+            ));
+        }
+        let view = &mut current.as_mut().expect("current chunk").1;
+        let current_name = view
+            .state_at(
+                world_x.rem_euclid(16) as u8,
+                world_y,
+                world_z.rem_euclid(16) as u8,
+            )?
+            .map(|state| state.name);
+        analysis.cells += 1;
+        match current_name.as_deref() {
+            Some(name) if name == expected.as_str() => analysis.matched += 1,
+            Some(name) if name != AIR_BLOCK_NAME => {
+                analysis.different += 1;
+                *analysis.by_block.entry(name.to_string()).or_default() += 1;
+                if analysis.samples.len() < 16 {
+                    analysis.samples.push(Sample {
+                        x: world_x,
+                        y: world_y,
+                        z: world_z,
+                        expected,
+                        current: Some(name.to_string()),
+                    });
+                }
+            }
+            _ => {
+                analysis.empty += 1;
+                if analysis.samples.len() < 16 {
+                    analysis.samples.push(Sample {
+                        x: world_x,
+                        y: world_y,
+                        z: world_z,
+                        expected,
+                        current: None,
+                    });
+                }
+            }
+        }
+    }
+    Ok(analysis)
+}
+
 /// Writes every record of the payload, one chunk at a time.
 pub fn write<S: WorldStorageHandle>(
     world: &BedrockWorld<S>,
