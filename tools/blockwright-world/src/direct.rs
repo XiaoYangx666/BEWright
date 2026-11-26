@@ -136,14 +136,28 @@ pub struct Analysis {
     pub samples: Vec<Sample>,
 }
 
+/// How one payload cell compares with the block currently in the world.
+enum Probe {
+    Matched,
+    /// Current block is solid but differs; carries its name.
+    Different(String),
+    Empty,
+}
+
 /// Decoded subchunks for one chunk, parsed lazily once per subchunk.
 struct ChunkView {
     chunk: Chunk,
     subchunks: BTreeMap<i8, Option<SubChunk>>,
+    /// Cached once per chunk: legacy terrain makes `Chunk::get_block` the only
+    /// source of truth below Y 128, and parsing it for every cell is expensive.
+    legacy_terrain: Option<bool>,
 }
 
 impl ChunkView {
-    fn state_at(&mut self, x: u8, y: i32, z: u8) -> Result<Option<BlockState>> {
+    /// Compare one cell without cloning its block state. The palette path hands
+    /// out a borrowed state, so a matching cell costs no allocation at all; the
+    /// name is only materialized for a differing block.
+    fn classify(&mut self, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
         let subchunk_y = i8::try_from(y.div_euclid(16))
             .map_err(|_| BedrockWorldError::Validation("world y is not a subchunk index".into()))?;
         if !self.subchunks.contains_key(&subchunk_y) {
@@ -155,26 +169,62 @@ impl ChunkView {
                 BedrockWorldError::Validation("world y is not a subchunk offset".into())
             })?;
             if let Some(state) = subchunk.block_state_at(x, local_y, z) {
-                return Ok(Some(state.clone()));
+                return Ok(classify_name(&state.name, expected));
+            }
+            // A subchunk can also carry legacy ids; those need the full lookup.
+            if subchunk.legacy_block_id_at(x, local_y, z).is_some() {
+                return self.legacy_probe(x, y, z, expected);
             }
         }
+        // An absent layer below Y 128 may still hold legacy terrain. Once that is
+        // ruled out the cell is air: going through `get_block` here would build
+        // an "unsupported chunk format" error for every empty cell.
+        if !self.has_legacy_terrain(y)? {
+            return Ok(Probe::Empty);
+        }
+        self.legacy_probe(x, y, z, expected)
+    }
+
+    fn has_legacy_terrain(&mut self, y: i32) -> Result<bool> {
+        if !(0..=127).contains(&y) {
+            return Ok(false);
+        }
+        if let Some(known) = self.legacy_terrain {
+            return Ok(known);
+        }
+        let known = self.chunk.legacy_terrain()?.is_some();
+        self.legacy_terrain = Some(known);
+        Ok(known)
+    }
+
+    fn legacy_probe(&self, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
         match self.chunk.get_block(
             x,
             i16::try_from(y)
                 .map_err(|_| BedrockWorldError::Validation("world y does not fit i16".into()))?,
             z,
         ) {
-            Ok(state) => Ok(Some(state)),
+            Ok(state) => Ok(classify_name(&state.name, expected)),
             Err(error)
                 if matches!(
                     error.kind(),
                     bedrock_world::BedrockWorldErrorKind::UnsupportedChunkFormat
                 ) =>
             {
-                Ok(None)
+                Ok(Probe::Empty)
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+fn classify_name(current: &str, expected: &str) -> Probe {
+    if current == expected {
+        Probe::Matched
+    } else if current == AIR_BLOCK_NAME {
+        Probe::Empty
+    } else {
+        Probe::Different(current.to_string())
     }
 }
 
@@ -228,34 +278,34 @@ pub fn analyze<S: WorldStorageHandle>(
                 ChunkView {
                     chunk,
                     subchunks: BTreeMap::new(),
+                    legacy_terrain: None,
                 },
             ));
         }
         let view = &mut current.as_mut().expect("current chunk").1;
-        let current_name = view
-            .state_at(
-                world_x.rem_euclid(16) as u8,
-                world_y,
-                world_z.rem_euclid(16) as u8,
-            )?
-            .map(|state| state.name);
+        let probe = view.classify(
+            world_x.rem_euclid(16) as u8,
+            world_y,
+            world_z.rem_euclid(16) as u8,
+            expected.as_str(),
+        )?;
         analysis.cells += 1;
-        match current_name.as_deref() {
-            Some(name) if name == expected.as_str() => analysis.matched += 1,
-            Some(name) if name != AIR_BLOCK_NAME => {
+        match probe {
+            Probe::Matched => analysis.matched += 1,
+            Probe::Different(name) => {
                 analysis.different += 1;
-                *analysis.by_block.entry(name.to_string()).or_default() += 1;
+                *analysis.by_block.entry(name.clone()).or_default() += 1;
                 if analysis.samples.len() < 16 {
                     analysis.samples.push(Sample {
                         x: world_x,
                         y: world_y,
                         z: world_z,
                         expected,
-                        current: Some(name.to_string()),
+                        current: Some(name),
                     });
                 }
             }
-            _ => {
+            Probe::Empty => {
                 analysis.empty += 1;
                 if analysis.samples.len() < 16 {
                     analysis.samples.push(Sample {
