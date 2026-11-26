@@ -9,7 +9,7 @@ import { WORLD_ROOT, atomicWrite, validateWorldFolderName, within } from '../../
 import { requireSidecar } from '../../project/sidecar.js';
 import { createBedrockWorld, defaultMinecraftWorldsDir, minecraftRunning } from '../../targets/bedrock/create.js';
 import { comparePreservation, preservationInfo } from '../../targets/bedrock/preserve.js';
-import { analyzeDirectStructureInWorld, backupWorld, validateDirectStructure, validateWorldDirectory, writeStructureToWorld } from '../../targets/bedrock/world.js';
+import { analyzeDirectStructureInWorld, backupWorld, validateDirectStructure, validateWorldDirectory, writeStructureToWorld, type DirectAnalysis } from '../../targets/bedrock/world.js';
 import { encodeJavaWorld, exportJavaWorld } from '../../targets/java/world.js';
 import { contentOptions, parseTriple } from '../args.js';
 
@@ -33,6 +33,30 @@ type LayoutImportOptions = {
   json?: boolean;
   report?: string;
 };
+
+type WorldOverwrites = {
+  cells: number;
+  matched: number;
+  air: number;
+  nonAir: number;
+  byBlock: Record<string, number>;
+  samples: { position: [number, number, number]; current: string; placed: string }[];
+};
+
+function overwriteSummary(analysis: DirectAnalysis): WorldOverwrites {
+  return {
+    cells: analysis.cells,
+    matched: analysis.matched,
+    air: analysis.empty,
+    nonAir: analysis.different,
+    byBlock: analysis.byBlock,
+    samples: analysis.samples.map((sample) => ({
+      position: [sample.x, sample.y, sample.z],
+      current: sample.current ?? 'minecraft:air',
+      placed: sample.expected,
+    })),
+  };
+}
 
 async function requireAbsent(path: string) {
   const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
@@ -91,25 +115,16 @@ export async function importLayout(options: LayoutImportOptions) {
     validateDirectStructure(world, region);
   }
   const dryRun = Boolean(options['dry-run']);
-  let overwrites;
-  if (existing) {
+  // A dry run has nothing else to do, so it stays a pure analysis pass. A real
+  // write gets the same comparison from the writer, which already reads the
+  // chunk it is about to merge into; running both would decode every chunk twice.
+  let overwrites: WorldOverwrites | undefined;
+  if (existing && dryRun) {
     try {
-      const analysis = await analyzeDirectStructureInWorld(world, region, {
+      overwrites = overwriteSummary(await analyzeDirectStructureInWorld(world, region, {
         world: destination,
         position: region.min,
-      });
-      overwrites = {
-        cells: analysis.cells,
-        matched: analysis.matched,
-        air: analysis.empty,
-        nonAir: analysis.different,
-        byBlock: analysis.byBlock,
-        samples: analysis.samples.map((sample) => ({
-          position: [sample.x, sample.y, sample.z],
-          current: sample.current ?? 'minecraft:air',
-          placed: sample.expected,
-        })),
-      };
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Could not read ${destination} before writing (close the server first): ${message}`, { cause: error });
@@ -140,35 +155,32 @@ export async function importLayout(options: LayoutImportOptions) {
     requireSidecar('blockwright-world');
     const write = (target: string) => writeStructureToWorld(world, region, {
       world: target, position: region.min, backup: false, skipEmptyChunks: true,
+      reportOverwrites: existing, verify: existing && !options['skip-verify'],
     });
     if (existing) {
       const preservationBefore = await preservationInfo(destination);
       const backupPath = await backupWorld(destination, options['backup-dir']);
+      let written: Awaited<ReturnType<typeof write>>;
       try {
-        report = { ...await write(destination), backupPath };
+        written = await write(destination);
       } catch (error) {
         throw new Error(`Writing ${destination} failed. Pre-import backup: ${backupPath}. ${String(error)}`, { cause: error });
       }
-      if (!options['skip-verify']) {
-        try {
-          const analysis = await analyzeDirectStructureInWorld(world, region, {
-            world: destination,
-            position: region.min,
-          });
-          report.verification = {
-            checked: analysis.cells,
-            matched: analysis.matched,
-            mismatched: analysis.different + analysis.empty,
-            missing: analysis.empty,
-            samples: analysis.samples.map((sample) => ({
-              position: [sample.x, sample.y, sample.z],
-              placed: sample.expected,
-              actual: sample.current,
-            })),
-          };
-        } catch (error) {
-          report.verification = { error: error instanceof Error ? error.message : String(error) };
-        }
+      const { overwrites: writtenOverwrites, verification, ...writeReport } = written;
+      report = { ...writeReport, backupPath };
+      if (writtenOverwrites) report.worldOverwrites = overwriteSummary(writtenOverwrites);
+      if (verification) {
+        report.verification = {
+          checked: verification.cells,
+          matched: verification.matched,
+          mismatched: verification.different + verification.empty,
+          missing: verification.empty,
+          samples: verification.samples.map((sample) => ({
+            position: [sample.x, sample.y, sample.z],
+            placed: sample.expected,
+            actual: sample.current,
+          })),
+        };
       }
       try {
         report.preservation = comparePreservation(preservationBefore, await preservationInfo(destination));

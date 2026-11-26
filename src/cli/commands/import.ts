@@ -272,6 +272,7 @@ export async function importCommand(argv: string[]) {
             rotation: rotation as 0 | 90 | 180 | 270,
             backup: Boolean(values.world),
             backupDir: values['backup-dir'],
+            verify: Boolean(values.world) && !values['skip-verify'],
           });
       placedBlocks += result.placedBlocks;
       regionCells += result.regionCells;

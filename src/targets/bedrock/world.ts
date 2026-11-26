@@ -26,6 +26,10 @@ export type WorldPlacement = {
 type DirectWorldPlacement = Omit<WorldPlacement, 'structure'> & {
   /** Direct, unrotated placements only. Skip columns containing no writes. */
   skipEmptyChunks?: boolean;
+  /** Report what the writer replaced, computed from the chunk it already reads. */
+  reportOverwrites?: boolean;
+  /** Read the committed chunks back and compare them with the payload. */
+  verify?: boolean;
 };
 
 export type WorldPlacementResult = {
@@ -37,6 +41,10 @@ export type WorldPlacementResult = {
   regionCells: number;
   initializedChunks: number;
   chunkVersion: number;
+  /** Pre-write state of the cells this placement wrote. */
+  overwrites?: DirectAnalysis;
+  /** Post-write readback of the same cells. */
+  verification?: DirectAnalysis;
 };
 
 type WorldWriterReport = WorldPlacementResult & { ok: boolean };
@@ -371,6 +379,8 @@ async function placeDirectStructureInWorld(
   const backupPath = options.backup === false ? undefined : await backupWorld(world, options.backupDir);
   const args = placementArgs(options, world, ['--direct-stdin']);
   if (options.skipEmptyChunks) args.push('--skip-empty-chunks');
+  if (options.reportOverwrites) args.push('--report-overwrites');
+  if (options.verify) args.push('--verify');
   const result = await runSidecarJson<WorldWriterReport>(binary, args, 'World writer', payload.chunks);
   return {
     backupPath,
@@ -379,6 +389,8 @@ async function placeDirectStructureInWorld(
     regionCells: result.placedBlocks,
     initializedChunks: result.initializedChunks,
     chunkVersion: result.chunkVersion,
+    overwrites: result.overwrites,
+    verification: result.verification,
   };
 }
 

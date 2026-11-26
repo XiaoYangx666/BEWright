@@ -273,7 +273,7 @@ node ./node_modules/bewright/dist/cli/index.js import ../my-arch --local
 
 > 单建筑导入**默认不回读**：写入完成后直接进游戏验收。世界表现异常（方块缺失、围栏/墙连接不对等）需要逐格定位时，用 `cache/sidecar/` 下的 sidecar（如 `blockwright-world-export` / `blockwright-world-diagnose`）把区域回读后自行比对。
 >
-> 清单模式写入**已有 Bedrock 世界**时默认对比：写入前在 `worldOverwrites` 里列出目标格当前方块与模型不一致的情况（按方块名统计，`matched` 为已经一致的格数，空气不计入覆盖），写入后再给出 `verification`（逐格对比）与 `preservation`（`level.dat` 哈希、玩家记录键）。`--dry-run` 只做前半部分。对比由 `blockwright-world --analyze` 直接读取目标区块完成，不导出 `.mcstructure`；写入前世界必须处于关闭状态。
+> 清单模式写入**已有 Bedrock 世界**时默认对比：`worldOverwrites` 列出目标格当前方块与模型不一致的情况（按方块名统计，`matched` 为已经一致的格数，空气不计入覆盖），`verification` 给出写入后的逐格回读，`preservation` 对比 `level.dat` 哈希与玩家记录键。写入时这两份报告来自同一次写入：覆盖统计在写入器读取待合并区块时顺手完成，校验在每批提交后回读该批区块。`--dry-run` 只做分析、不写入；`--skip-verify` 只跳过回读。对比全程不导出 `.mcstructure`，写入前世界必须处于关闭状态。
 
 ### 用清单导入多个建筑
 

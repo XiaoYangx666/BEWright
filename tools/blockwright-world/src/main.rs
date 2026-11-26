@@ -29,6 +29,8 @@ struct Args {
     structure: Option<PathBuf>,
     direct_stdin: bool,
     analyze: bool,
+    report_overwrites: bool,
+    verify: bool,
     skip_empty_chunks: bool,
     x: i32,
     y: i32,
@@ -41,7 +43,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks] [--analyze]"
+        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks] [--analyze] [--report-overwrites] [--verify]"
     );
     process::exit(2);
 }
@@ -55,6 +57,8 @@ fn parse() -> Args {
     let mut structure = None;
     let mut direct_stdin = false;
     let mut analyze = false;
+    let mut report_overwrites = false;
+    let mut verify = false;
     let mut skip_empty_chunks = false;
     let (mut x, mut y, mut z, mut dimension) = (None, None, None, 0);
     let mut rotation = McStructureRotation::None;
@@ -67,6 +71,8 @@ fn parse() -> Args {
             "--structure" => structure = Some(PathBuf::from(value(&mut input))),
             "--direct-stdin" => direct_stdin = true,
             "--analyze" => analyze = true,
+            "--report-overwrites" => report_overwrites = true,
+            "--verify" => verify = true,
             "--skip-empty-chunks" => skip_empty_chunks = true,
             "--x" => x = value(&mut input).parse().ok(),
             "--y" => y = value(&mut input).parse().ok(),
@@ -89,7 +95,10 @@ fn parse() -> Args {
     if direct_stdin == structure.is_some() {
         usage();
     }
-    if analyze && !direct_stdin {
+    if (analyze || report_overwrites || verify) && !direct_stdin {
+        usage();
+    }
+    if analyze && (report_overwrites || verify) {
         usage();
     }
     Args {
@@ -97,6 +106,8 @@ fn parse() -> Args {
         structure,
         direct_stdin,
         analyze,
+        report_overwrites,
+        verify,
         skip_empty_chunks,
         x: x.unwrap_or_else(|| usage()),
         y: y.unwrap_or_else(|| usage()),
@@ -286,40 +297,25 @@ fn run(args: Args) -> bedrock_world::Result<()> {
             usage();
         }
         let analysis = direct::analyze(&world, (args.x, args.y, args.z, dimension), payload)?;
-        let samples: Vec<_> = analysis
-            .samples
-            .iter()
-            .map(|sample| {
-                json!({
-                    "x": sample.x,
-                    "y": sample.y,
-                    "z": sample.z,
-                    "expected": sample.expected,
-                    "current": sample.current,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            json!({"ok":true,"analysis":{
-                "cells":analysis.cells,
-                "matched":analysis.matched,
-                "different":analysis.different,
-                "empty":analysis.empty,
-                "byBlock":analysis.by_block,
-                "samples":samples,
-            }})
-        );
+        println!("{}", json!({"ok":true,"analysis":analysis_json(&analysis)}));
         return Ok(());
     }
     let guard = WriteGuard::confirmed(&args.world, "place Blockwright structure");
+    let mut overwrites = None;
+    let mut verification = None;
     let outcome = if let Some(payload) = payload.as_mut() {
         let result = direct::write(
             &world,
             (args.x, args.y, args.z, dimension),
             payload,
-            !args.skip_empty_chunks,
+            direct::WriteOptions {
+                initialize_empty_chunks: !args.skip_empty_chunks,
+                report_overwrites: args.report_overwrites,
+                verify: args.verify,
+            },
         )?;
+        overwrites = result.overwrites.map(|analysis| analysis_json(&analysis));
+        verification = result.verification.map(|analysis| analysis_json(&analysis));
         Outcome {
             touched_chunks: result.affected_chunks.len(),
             placed_blocks: result.box_blocks,
@@ -379,11 +375,40 @@ fn run(args: Args) -> bedrock_world::Result<()> {
             chunk_version,
         }
     };
-    println!(
-        "{}",
-        json!({"ok":true,"touchedChunks":outcome.touched_chunks,"placedBlocks":outcome.placed_blocks,"initializedChunks":outcome.initialized_chunks,"chunkVersion":outcome.chunk_version})
-    );
+    let mut output = json!({"ok":true,"touchedChunks":outcome.touched_chunks,"placedBlocks":outcome.placed_blocks,"initializedChunks":outcome.initialized_chunks,"chunkVersion":outcome.chunk_version});
+    if let Some(overwrites) = overwrites {
+        output["overwrites"] = overwrites;
+    }
+    if let Some(verification) = verification {
+        output["verification"] = verification;
+    }
+    println!("{output}");
     Ok(())
+}
+
+
+fn analysis_json(analysis: &direct::Analysis) -> serde_json::Value {
+    let samples: Vec<_> = analysis
+        .samples
+        .iter()
+        .map(|sample| {
+            json!({
+                "x": sample.x,
+                "y": sample.y,
+                "z": sample.z,
+                "expected": sample.expected,
+                "current": sample.current,
+            })
+        })
+        .collect();
+    json!({
+        "cells": analysis.cells,
+        "matched": analysis.matched,
+        "different": analysis.different,
+        "empty": analysis.empty,
+        "byBlock": analysis.by_block,
+        "samples": samples,
+    })
 }
 
 fn main() {

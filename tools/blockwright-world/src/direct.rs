@@ -50,6 +50,19 @@ pub struct DirectWriteResult {
     pub affected_chunks: Vec<ChunkPos>,
     pub initialized_chunks: usize,
     pub chunk_version: u8,
+    /// What the writer replaced, computed from the chunk it read before writing.
+    pub overwrites: Option<Analysis>,
+    /// Read-back of the committed chunks, when the caller asked for it.
+    pub verification: Option<Analysis>,
+}
+
+/// Which extra reports the writer produces. Both read the same accumulator, so
+/// callers that only need one pay for one.
+#[derive(Default, Clone, Copy)]
+pub struct WriteOptions {
+    pub initialize_empty_chunks: bool,
+    pub report_overwrites: bool,
+    pub verify: bool,
 }
 
 /// Header and palette of a `BLKWRDIR` payload, read before any world is opened so
@@ -145,23 +158,31 @@ enum Probe {
 }
 
 /// Decoded subchunks for one chunk, parsed lazily once per subchunk.
-struct ChunkView {
-    chunk: Chunk,
+struct ChunkBlocks {
     subchunks: BTreeMap<i8, Option<SubChunk>>,
     /// Cached once per chunk: legacy terrain makes `Chunk::get_block` the only
     /// source of truth below Y 128, and parsing it for every cell is expensive.
     legacy_terrain: Option<bool>,
 }
 
-impl ChunkView {
+impl Default for ChunkBlocks {
+    fn default() -> Self {
+        Self {
+            subchunks: BTreeMap::new(),
+            legacy_terrain: None,
+        }
+    }
+}
+
+impl ChunkBlocks {
     /// Compare one cell without cloning its block state. The palette path hands
     /// out a borrowed state, so a matching cell costs no allocation at all; the
     /// name is only materialized for a differing block.
-    fn classify(&mut self, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
+    fn classify(&mut self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
         let subchunk_y = i8::try_from(y.div_euclid(16))
             .map_err(|_| BedrockWorldError::Validation("world y is not a subchunk index".into()))?;
         if !self.subchunks.contains_key(&subchunk_y) {
-            let parsed = self.chunk.get_subchunk(subchunk_y)?;
+            let parsed = chunk.get_subchunk(subchunk_y)?;
             self.subchunks.insert(subchunk_y, parsed);
         }
         if let Some(Some(subchunk)) = self.subchunks.get(&subchunk_y) {
@@ -173,32 +194,32 @@ impl ChunkView {
             }
             // A subchunk can also carry legacy ids; those need the full lookup.
             if subchunk.legacy_block_id_at(x, local_y, z).is_some() {
-                return self.legacy_probe(x, y, z, expected);
+                return self.legacy_probe(chunk, x, y, z, expected);
             }
         }
         // An absent layer below Y 128 may still hold legacy terrain. Once that is
         // ruled out the cell is air: going through `get_block` here would build
         // an "unsupported chunk format" error for every empty cell.
-        if !self.has_legacy_terrain(y)? {
+        if !self.has_legacy_terrain(chunk, y)? {
             return Ok(Probe::Empty);
         }
-        self.legacy_probe(x, y, z, expected)
+        self.legacy_probe(chunk, x, y, z, expected)
     }
 
-    fn has_legacy_terrain(&mut self, y: i32) -> Result<bool> {
+    fn has_legacy_terrain(&mut self, chunk: &Chunk, y: i32) -> Result<bool> {
         if !(0..=127).contains(&y) {
             return Ok(false);
         }
         if let Some(known) = self.legacy_terrain {
             return Ok(known);
         }
-        let known = self.chunk.legacy_terrain()?.is_some();
+        let known = chunk.legacy_terrain()?.is_some();
         self.legacy_terrain = Some(known);
         Ok(known)
     }
 
-    fn legacy_probe(&self, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
-        match self.chunk.get_block(
+    fn legacy_probe(&self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
+        match chunk.get_block(
             x,
             i16::try_from(y)
                 .map_err(|_| BedrockWorldError::Validation("world y does not fit i16".into()))?,
@@ -216,6 +237,66 @@ impl ChunkView {
             Err(error) => Err(error),
         }
     }
+}
+
+/// Compare every cell the accumulator writes with the chunk it applies to.
+/// Used both for the pre-write overwrite report and for the post-write readback,
+/// so a single pass can answer either question.
+fn compare_chunk(
+    chunk: &Chunk,
+    accumulator: &ChunkAccumulator,
+    palette: &[McStructurePaletteEntry],
+    stats: &mut Analysis,
+    blocks: &mut ChunkBlocks,
+) -> Result<()> {
+    for (&subchunk_y, layer) in &accumulator.layers {
+        for (index, &palette_index) in layer.iter().enumerate() {
+            if palette_index == UNSET {
+                continue;
+            }
+            let Some(entry) = usize::try_from(palette_index)
+                .ok()
+                .and_then(|index| palette.get(index))
+            else {
+                continue;
+            };
+            // `block_storage_index` is x*256 + z*16 + y.
+            let local_x = u8::try_from(index / 256).unwrap_or(0);
+            let local_z = u8::try_from((index % 256) / 16).unwrap_or(0);
+            let local_y = u8::try_from(index % 16).unwrap_or(0);
+            let world_y = i32::from(subchunk_y) * 16 + i32::from(local_y);
+            stats.cells += 1;
+            match blocks.classify(chunk, local_x, world_y, local_z, &entry.name)? {
+                Probe::Matched => stats.matched += 1,
+                Probe::Different(name) => {
+                    stats.different += 1;
+                    *stats.by_block.entry(name.clone()).or_default() += 1;
+                    if stats.samples.len() < 16 {
+                        stats.samples.push(Sample {
+                            x: chunk.pos.x * 16 + i32::from(local_x),
+                            y: world_y,
+                            z: chunk.pos.z * 16 + i32::from(local_z),
+                            expected: entry.name.clone(),
+                            current: Some(name),
+                        });
+                    }
+                }
+                Probe::Empty => {
+                    stats.empty += 1;
+                    if stats.samples.len() < 16 {
+                        stats.samples.push(Sample {
+                            x: chunk.pos.x * 16 + i32::from(local_x),
+                            y: world_y,
+                            z: chunk.pos.z * 16 + i32::from(local_z),
+                            expected: entry.name.clone(),
+                            current: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn classify_name(current: &str, expected: &str) -> Probe {
@@ -241,7 +322,8 @@ pub fn analyze<S: WorldStorageHandle>(
     let block_count = usize::try_from(payload.reader.u32()?)
         .map_err(|_| BedrockWorldError::Validation("block count overflowed".into()))?;
     let mut analysis = Analysis::default();
-    let mut current: Option<(ChunkPos, ChunkView)> = None;
+    let mut current: Option<(ChunkPos, Chunk)> = None;
+    let mut blocks = ChunkBlocks::default();
     for _ in 0..block_count {
         let x = i32::try_from(payload.reader.u32()?)
             .map_err(|_| BedrockWorldError::Validation("direct x coordinate overflowed".into()))?;
@@ -272,18 +354,12 @@ pub fn analyze<S: WorldStorageHandle>(
             dimension,
         };
         if current.as_ref().map(|(pos, _)| *pos) != Some(chunk_pos) {
-            let chunk = world.get_chunk_blocking(chunk_pos)?;
-            current = Some((
-                chunk_pos,
-                ChunkView {
-                    chunk,
-                    subchunks: BTreeMap::new(),
-                    legacy_terrain: None,
-                },
-            ));
+            current = Some((chunk_pos, world.get_chunk_blocking(chunk_pos)?));
+            blocks = ChunkBlocks::default();
         }
-        let view = &mut current.as_mut().expect("current chunk").1;
-        let probe = view.classify(
+        let (_, chunk) = current.as_ref().expect("current chunk");
+        let probe = blocks.classify(
+            chunk,
             world_x.rem_euclid(16) as u8,
             world_y,
             world_z.rem_euclid(16) as u8,
@@ -327,7 +403,7 @@ pub fn write<S: WorldStorageHandle>(
     world: &BedrockWorld<S>,
     placement: (i32, i32, i32, Dimension),
     payload: &mut Payload<impl Read>,
-    initialize_empty_chunks: bool,
+    options: WriteOptions,
 ) -> Result<DirectWriteResult> {
     let (origin_x, origin_y, origin_z, dimension) = placement;
     let (size_x, size_y, size_z) = (payload.size[0], payload.size[1], payload.size[2]);
@@ -350,6 +426,12 @@ pub fn write<S: WorldStorageHandle>(
     let mut current: Option<(ChunkPos, ChunkAccumulator)> = None;
     let mut affected_chunks = Vec::new();
     let mut written = HashSet::new();
+    let mut overwrites = options.report_overwrites.then(Analysis::default);
+    let mut verification = options.verify.then(Analysis::default);
+    // Chunks flushed since the last commit, kept so the readback can compare
+    // what the world returns with the cells this pass asked for.
+    let mut pending: Vec<(ChunkPos, ChunkAccumulator)> = Vec::new();
+    let palette = &payload.palette;
     for _ in 0..block_count {
         let x = i32::try_from(payload.reader.u32()?).map_err(|_| {
             BedrockWorldError::Validation("direct x coordinate overflowed".into())
@@ -390,17 +472,26 @@ pub fn write<S: WorldStorageHandle>(
                     transaction.as_mut().expect("write transaction"),
                     previous,
                     &accumulator,
-                    payload,
+                    &palette,
                     (layer_min, layer_max),
                     &empty_layer,
                     &mut affected_chunks,
+                    &mut overwrites,
                 )?;
-                if initialize_empty_chunks {
+                if options.initialize_empty_chunks {
                     written.insert((previous.x, previous.z));
                 }
+                if options.verify {
+                    pending.push((previous, accumulator));
+                }
                 if affected_chunks.len().is_multiple_of(COMMITS_PER_BATCH) {
-                    transaction.take().expect("write transaction").commit()?;
-                    transaction = Some(world.transaction());
+                    commit_batch(
+                        world,
+                        &mut transaction,
+                        &mut pending,
+                        &palette,
+                        &mut verification,
+                    )?;
                 }
             }
             current = Some((chunk, ChunkAccumulator::default()));
@@ -420,18 +511,22 @@ pub fn write<S: WorldStorageHandle>(
             transaction.as_mut().expect("write transaction"),
             previous,
             &accumulator,
-            payload,
+            &palette,
             (layer_min, layer_max),
             &empty_layer,
             &mut affected_chunks,
+            &mut overwrites,
         )?;
-        if initialize_empty_chunks {
+        if options.initialize_empty_chunks {
             written.insert((previous.x, previous.z));
+        }
+        if options.verify {
+            pending.push((previous, accumulator));
         }
     }
     // Box columns that received no block still get their all-air layers, the same
     // set of chunks the dense writer touched.
-    if initialize_empty_chunks {
+    if options.initialize_empty_chunks {
         for chunk_x in origin_x.div_euclid(16)..=(origin_x + size_x - 1).div_euclid(16) {
             for chunk_z in origin_z.div_euclid(16)..=(origin_z + size_z - 1).div_euclid(16) {
                 if written.contains(&(chunk_x, chunk_z)) {
@@ -446,19 +541,31 @@ pub fn write<S: WorldStorageHandle>(
                         dimension,
                     },
                     &ChunkAccumulator::default(),
-                    payload,
+                    &palette,
                     (layer_min, layer_max),
                     &empty_layer,
                     &mut affected_chunks,
+                    &mut overwrites,
                 )?;
                 if affected_chunks.len().is_multiple_of(COMMITS_PER_BATCH) {
-                    transaction.take().expect("write transaction").commit()?;
-                    transaction = Some(world.transaction());
+                    commit_batch(
+                        world,
+                        &mut transaction,
+                        &mut pending,
+                        &palette,
+                        &mut verification,
+                    )?;
                 }
             }
         }
     }
-    transaction.take().expect("write transaction").commit()?;
+    commit_batch(
+        world,
+        &mut transaction,
+        &mut pending,
+        &palette,
+        &mut verification,
+    )?;
 
     let chunk_version = affected_chunks
         .iter()
@@ -486,7 +593,39 @@ pub fn write<S: WorldStorageHandle>(
         affected_chunks,
         initialized_chunks,
         chunk_version,
+        overwrites,
+        verification,
     })
+}
+
+/// Commit the open transaction, then read back every chunk it covered.
+fn commit_batch<'a, S: WorldStorageHandle>(
+    world: &'a BedrockWorld<S>,
+    transaction: &mut Option<WorldTransaction<'a, S>>,
+    pending: &mut Vec<(ChunkPos, ChunkAccumulator)>,
+    palette: &[McStructurePaletteEntry],
+    verification: &mut Option<Analysis>,
+) -> Result<()> {
+    transaction
+        .take()
+        .expect("write transaction")
+        .commit()?;
+    *transaction = Some(world.transaction());
+    if let Some(stats) = verification.as_mut() {
+        for (pos, accumulator) in pending.drain(..) {
+            let chunk = world.get_chunk_blocking(pos)?;
+            compare_chunk(
+                &chunk,
+                &accumulator,
+                palette,
+                stats,
+                &mut ChunkBlocks::default(),
+            )?;
+        }
+    } else {
+        pending.clear();
+    }
+    Ok(())
 }
 
 /// One chunk's subchunk layers, as palette indices (`UNSET` where untouched).
@@ -533,19 +672,31 @@ fn flush_chunk<S: WorldStorageHandle>(
     transaction: &mut WorldTransaction<'_, S>,
     pos: ChunkPos,
     accumulator: &ChunkAccumulator,
-    payload: &Payload<impl Read>,
+    palette: &[McStructurePaletteEntry],
     layers: (i8, i8),
     empty_layer: &[i32],
     affected_chunks: &mut Vec<ChunkPos>,
+    overwrites: &mut Option<Analysis>,
 ) -> Result<()> {
     let existing = world.get_chunk_blocking(pos)?;
+    // The chunk is already in hand for the merge, so the overwrite report costs
+    // one comparison instead of a second process and a second payload stream.
+    if let Some(stats) = overwrites.as_mut() {
+        compare_chunk(
+            &existing,
+            accumulator,
+            palette,
+            stats,
+            &mut ChunkBlocks::default(),
+        )?;
+    }
     for subchunk_y in layers.0..=layers.1 {
         let layer = accumulator
             .layers
             .get(&subchunk_y)
             .map_or(empty_layer, Vec::as_slice);
         let bytes = encode_subchunk(
-            &payload.palette,
+            palette,
             layer,
             existing.get_subchunk(subchunk_y)?.as_ref(),
         )?;
@@ -556,7 +707,7 @@ fn flush_chunk<S: WorldStorageHandle>(
         pos,
         version,
         &existing,
-        &payload.palette,
+        palette,
         &accumulator,
         &mut height_map,
     )?;
