@@ -47,6 +47,24 @@ test('a changed boundary cell invalidates only its touching chunk neighbors', ()
   assert.equal(s.meshVersions.get('0,0,-1'), s.revision, 'the adjacent chunk invalidates its neighbor');
 });
 
+test('one-shot structures skip mesh bookkeeping but keep cells and lookups', () => {
+  const s = new Structure(false);
+  s.set(15, -1, 15, block('stone'));
+  s.fill({ min: [0, 0, 0], max: [1, 8, 1] }, block('dirt'));
+  assert.equal(s.meshVersions.size, 0);
+  assert.equal(s.get(15, -1, 15)?.name, 'minecraft:stone');
+  assert.equal(s.get(0, 7, 0)?.name, 'minecraft:dirt');
+  assert.ok(s.revision > 0);
+  // A cached miss must not hide a chunk created afterwards.
+  assert.equal(s.get(100, 0, 100), null);
+  s.set(100, 0, 100, block('stone'));
+  assert.equal(s.get(100, 0, 100)?.name, 'minecraft:stone');
+  // Direct chunk replacement is outside the cache and needs an explicit reset.
+  s.chunks.set('0,-1,0', { origin: [0, -16, 0], cells: new Uint16Array(4096) });
+  s.invalidateChunkCache();
+  assert.equal(s.get(15, -1, 15), null);
+});
+
 test('column fill matches ordered single-cell writes across negative chunk boundaries', () => {
   const batched = new Structure(), individual = new Structure();
   const stone = block('stone');

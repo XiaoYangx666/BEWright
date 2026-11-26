@@ -22,16 +22,29 @@ export function assertBox(box: Box) {
 export function contains(box: Box, x: number, y: number, z: number) {
   return x >= box.min[0] && x < box.max[0] && y >= box.min[1] && y < box.max[1] && z >= box.min[2] && z < box.max[2];
 }
+type Chunk = { origin: Vec3; cells: Uint16Array };
+
 export class Structure {
   // Global palette in the POC. Production: chunk-local palette with uniform/packed modes.
   readonly palette: (State | null)[] = [null];
-  readonly chunks = new Map<string, { origin: Vec3; cells: Uint16Array }>();
+  readonly chunks = new Map<string, Chunk>();
   /** Column key `cx,cz` -> chunk Y indices present there; keeps `touched()` cheap. */
   private readonly columnChunks = new Map<string, Set<number>>();
   private readonly ids = new Map<string, number>();
   /** Identity fast path: frozen states (the minecraftBlock cache) are immutable, so identical references always share a palette ID. */
   private readonly frozenIds = new Map<State, number>();
   readonly meshVersions = new Map<string, number>();
+  /**
+   * One-chunk memo for the numeric lookup path. Import-scale models touch
+   * millions of cells, and building `"cx,cy,cz"` per read/write dominated both
+   * time and garbage; callers that replace `chunks` directly must call
+   * `invalidateChunkCache()`.
+   */
+  private cacheCx = NaN;
+  private cacheCy = NaN;
+  private cacheCz = NaN;
+  private cacheKey = '';
+  private cacheChunk: Chunk | undefined;
   revision = 0;
   /**
    * Highest Y of any explicitly written cell, including explicit air.
@@ -39,6 +52,30 @@ export class Structure {
    * carved up to here" — surface queries need it to scan the mined-out space.
    */
   ceiling = -Infinity;
+  /**
+   * `meshVersions` only serves incremental preview meshing. Turn it off for
+   * one-shot imports: it costs up to seven string keys per written cell.
+   */
+  constructor(readonly trackMeshVersions = true) {}
+
+  invalidateChunkCache() {
+    this.cacheCx = NaN;
+    this.cacheCy = NaN;
+    this.cacheCz = NaN;
+    this.cacheKey = '';
+    this.cacheChunk = undefined;
+  }
+
+  private chunkAt(cx: number, cy: number, cz: number): Chunk | undefined {
+    if (cx === this.cacheCx && cy === this.cacheCy && cz === this.cacheCz) return this.cacheChunk;
+    this.cacheCx = cx;
+    this.cacheCy = cy;
+    this.cacheCz = cz;
+    this.cacheKey = `${cx},${cy},${cz}`;
+    this.cacheChunk = this.chunks.get(this.cacheKey);
+    return this.cacheChunk;
+  }
+
   snapshot(): StructureSnapshot {
     return {
       palette: [...this.palette],
@@ -107,12 +144,12 @@ export class Structure {
     const cx = Math.floor(x / CHUNK),
       cy = Math.floor(y / CHUNK),
       cz = Math.floor(z / CHUNK);
-    const key = `${cx},${cy},${cz}`;
-    let chunk = this.chunks.get(key);
+    let chunk = this.chunkAt(cx, cy, cz);
     if (!chunk) {
       if (id === VOID) return;
       chunk = { origin: [cx * CHUNK, cy * CHUNK, cz * CHUNK], cells: new Uint16Array(CHUNK ** 3) };
-      this.chunks.set(key, chunk);
+      this.chunks.set(this.cacheKey, chunk);
+      this.cacheChunk = chunk;
       const column = `${cx},${cz}`;
       const levels = this.columnChunks.get(column);
       if (levels) levels.add(cy);
@@ -125,20 +162,25 @@ export class Structure {
     if (chunk.cells[i] !== id) {
       chunk.cells[i] = id;
       this.revision++;
-      this.meshVersions.set(key, this.revision);
-      if (lx === 0) this.meshVersions.set(`${cx - 1},${cy},${cz}`, this.revision);
-      else if (lx === CHUNK - 1) this.meshVersions.set(`${cx + 1},${cy},${cz}`, this.revision);
-      if (ly === 0) this.meshVersions.set(`${cx},${cy - 1},${cz}`, this.revision);
-      else if (ly === CHUNK - 1) this.meshVersions.set(`${cx},${cy + 1},${cz}`, this.revision);
-      if (lz === 0) this.meshVersions.set(`${cx},${cy},${cz - 1}`, this.revision);
-      else if (lz === CHUNK - 1) this.meshVersions.set(`${cx},${cy},${cz + 1}`, this.revision);
+      if (this.trackMeshVersions) this.touchMeshVersions(cx, cy, cz, lx, ly, lz);
     }
+  }
+  /** Mark the chunk and its 6-neighbours as remeshable. */
+  private touchMeshVersions(cx: number, cy: number, cz: number, lx: number, ly: number, lz: number) {
+    const key = this.cacheKey;
+    this.meshVersions.set(key, this.revision);
+    if (lx === 0) this.meshVersions.set(`${cx - 1},${cy},${cz}`, this.revision);
+    else if (lx === CHUNK - 1) this.meshVersions.set(`${cx + 1},${cy},${cz}`, this.revision);
+    if (ly === 0) this.meshVersions.set(`${cx},${cy - 1},${cz}`, this.revision);
+    else if (ly === CHUNK - 1) this.meshVersions.set(`${cx},${cy + 1},${cz}`, this.revision);
+    if (lz === 0) this.meshVersions.set(`${cx},${cy},${cz - 1}`, this.revision);
+    else if (lz === CHUNK - 1) this.meshVersions.set(`${cx},${cy},${cz + 1}`, this.revision);
   }
   getId(x: number, y: number, z: number): number {
     const cx = Math.floor(x / CHUNK),
       cy = Math.floor(y / CHUNK),
       cz = Math.floor(z / CHUNK);
-    const chunk = this.chunks.get(`${cx},${cy},${cz}`);
+    const chunk = this.chunkAt(cx, cy, cz);
     return chunk?.cells[((x - cx * CHUNK) * CHUNK + y - cy * CHUNK) * CHUNK + z - cz * CHUNK] ?? VOID;
   }
   get(x: number, y: number, z: number) {
@@ -175,7 +217,7 @@ export class Structure {
       lz = z - cz * CHUNK;
     let activeCy = Infinity;
     let key = '';
-    let chunk: { origin: Vec3; cells: Uint16Array } | undefined;
+    let chunk: Chunk | undefined;
     for (let y = y0; y < y1; y++) {
       const cy = Math.floor(y / CHUNK);
       if (cy !== activeCy) {
@@ -190,6 +232,11 @@ export class Structure {
           if (levels) levels.add(cy);
           else this.columnChunks.set(column, new Set([cy]));
         }
+        this.cacheCx = cx;
+        this.cacheCy = cy;
+        this.cacheCz = cz;
+        this.cacheKey = key;
+        this.cacheChunk = chunk;
       }
       if (!chunk) continue;
       const ly = y - cy * CHUNK;
@@ -197,13 +244,7 @@ export class Structure {
       if (chunk.cells[index] === id) continue;
       chunk.cells[index] = id;
       this.revision++;
-      this.meshVersions.set(key, this.revision);
-      if (lx === 0) this.meshVersions.set(`${cx - 1},${cy},${cz}`, this.revision);
-      else if (lx === CHUNK - 1) this.meshVersions.set(`${cx + 1},${cy},${cz}`, this.revision);
-      if (ly === 0) this.meshVersions.set(`${cx},${cy - 1},${cz}`, this.revision);
-      else if (ly === CHUNK - 1) this.meshVersions.set(`${cx},${cy + 1},${cz}`, this.revision);
-      if (lz === 0) this.meshVersions.set(`${cx},${cy},${cz - 1}`, this.revision);
-      else if (lz === CHUNK - 1) this.meshVersions.set(`${cx},${cy},${cz + 1}`, this.revision);
+      if (this.trackMeshVersions) this.touchMeshVersions(cx, cy, cz, lx, ly, lz);
     }
   }
   /** Conditional paint. Select against the original region before writing, so predicates cannot see partial edits. */

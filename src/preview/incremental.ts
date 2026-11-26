@@ -59,6 +59,7 @@ export class IncrementalPreview {
         createHash('sha256').update(JSON.stringify(names)).update(Buffer.from(canonical.buffer)).digest('hex'),
       );
     }
+    world.invalidateChunkCache();
     // Lighting is opt-in per snapshot: the default preview stays flat and fast.
     // Toggling it changes every mesh color, so it participates in the configuration.
     const wantLight = snapshot.light === true;

@@ -86,13 +86,21 @@ export function normalizePlacementIds(values: readonly string[] | undefined) {
 
 export async function composeWorldLayout(
   layout: Awaited<ReturnType<typeof readWorldLayout>>,
-  options: { edition: 'bedrock' | 'java'; content: ContentOptions; only: string[]; except?: string[]; skipAir: boolean },
+  options: {
+    edition: 'bedrock' | 'java';
+    content: ContentOptions;
+    only: string[];
+    except?: string[];
+    skipAir: boolean;
+    /** Off for one-shot imports: incremental preview bookkeeping is pure overhead. */
+    meshVersions?: boolean;
+  },
 ) {
   const selected = new Set(options.only);
   const excluded = new Set(options.except ?? []);
   for (const id of [...selected, ...excluded])
     if (!layout.placements.some((placement) => placement.id === id)) throw new Error(`Unknown placement id: ${id}`);
-  const world = new Structure();
+  const world = new Structure(options.meshVersions ?? true);
   const loaded = new Map<string, LoadedBuilding>();
   const min: Vec3 = [Infinity, Infinity, Infinity];
   const max: Vec3 = [-Infinity, -Infinity, -Infinity];
@@ -123,15 +131,26 @@ export async function composeWorldLayout(
     if (bounds.max.some((value) => !isWorldCoordinate(value - 1)))
       throw new Error(`Placement "${placement.id}" exceeds the world coordinate range`);
     const palette = new Map<number, number>();
+    const identity = spec.rotation === 0 && spec.mirror === 'none';
     let placed = 0;
     let overlaps = 0;
     model.forEach((x, y, z, id) => {
       const state = model.palette[id]!;
       const air = state.name === 'minecraft:air';
       if (air && options.skipAir) return;
-      const point = transformPosition([x, y, z], spec, [0, 0, 0], offset);
-      if (point[1] < -64 || point[1] > 319)
-        throw new Error(`Placement "${placement.id}" exceeds the Overworld Y range -64..319 at ${point.join(',')}`);
+      // Unrotated placements dominate layout imports; skip the per-cell tuple
+      // that transformPosition would allocate for a plain translation.
+      let px: number, py: number, pz: number;
+      if (identity) {
+        px = x + offset[0];
+        py = y + offset[1];
+        pz = z + offset[2];
+      } else {
+        const point = transformPosition([x, y, z], spec, [0, 0, 0], offset);
+        [px, py, pz] = point;
+      }
+      if (py < -64 || py > 319)
+        throw new Error(`Placement "${placement.id}" exceeds the Overworld Y range -64..319 at ${px},${py},${pz}`);
       let mapped = palette.get(id);
       if (mapped === undefined) {
         const { states, untransformed, remapped } = transformState(state, spec);
@@ -140,20 +159,22 @@ export async function composeWorldLayout(
         mapped = world.intern(remapped ? block(state.name, states) : state);
         palette.set(id, mapped);
       }
-      const previous = world.get(...point);
-      if (previous) {
+      const previousId = world.getId(px, py, pz);
+      if (previousId) {
         overlaps++;
-        if (previous.name === 'minecraft:air') explicitAir--;
+        if (world.palette[previousId]?.name === 'minecraft:air') explicitAir--;
       } else {
         cells++;
       }
       if (air) explicitAir++;
-      world.setId(...point, mapped);
+      world.setId(px, py, pz, mapped);
       placed++;
-      for (const axis of [0, 1, 2]) {
-        min[axis] = Math.min(min[axis], point[axis]);
-        max[axis] = Math.max(max[axis], point[axis] + 1);
-      }
+      if (px < min[0]) min[0] = px;
+      if (py < min[1]) min[1] = py;
+      if (pz < min[2]) min[2] = pz;
+      if (px + 1 > max[0]) max[0] = px + 1;
+      if (py + 1 > max[1]) max[1] = py + 1;
+      if (pz + 1 > max[2]) max[2] = pz + 1;
     }, region);
     results.push({ ...placement, building: definition.id, params, bounds, cells: placed, overlaps });
   }

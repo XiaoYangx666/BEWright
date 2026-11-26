@@ -58,6 +58,7 @@ export async function importLayout(options: LayoutImportOptions) {
     only: options.only ?? [],
     except: options.except ?? [],
     skipAir: options['skip-air'] ?? false,
+    meshVersions: false,
   });
   const name = options['new-world']?.trim() || layout.name.trim();
   const spawn = options.spawn === undefined ? layout.spawn : parseTriple(options.spawn, 'spawn');

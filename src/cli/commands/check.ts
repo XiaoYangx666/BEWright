@@ -7,6 +7,7 @@ import { PROJECT_ROOT, atomicWrite, within } from '../../project/paths.js';
 import { formatDiagnostics, type Severity } from '../../authoring/diagnostics.js';
 import { hasAuthoringChecks } from '../../authoring/model-checks.js';
 import { buildingArgs, CONTENT_OPTION, PARAM_OPTION, contentOptions } from '../args.js';
+import { EXIT, UsageError } from '../errors.js';
 
 export const CHECK_HELP = `bewright check <building> [options]
 
@@ -22,16 +23,9 @@ or read back, so this is the fast static gate that \`bewright build\` also runs.
 
 Exit codes: 0 passed, 1 failed, unavailable or skipped checks, 2 usage/config error.`;
 
-/** Exit codes are part of the CLI contract; keep them in one place. */
-export const EXIT = { ok: 0, failed: 1, usage: 2 } as const;
-
-/** Usage/configuration problems must not be reported as a failed check. */
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UsageError';
-  }
-}
+/** Exit codes and usage errors live in a dependency-free module so the CLI
+ *  dispatcher does not have to load this command to report its own errors. */
+export { EXIT, UsageError } from '../errors.js';
 
 function countsLine(counts: Readonly<Record<Severity, number>>): string {
   return `error ${counts.error} / warning ${counts.warning} / unknown ${counts.unknown} / info ${counts.info}`;
