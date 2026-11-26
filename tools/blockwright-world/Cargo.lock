@@ -82,7 +82,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "bedrock-leveldb"
 version = "0.4.0"
-source = "git+https://github.com/BE-Community-Dev/bedrock-leveldb.git?branch=main#894abd1fb9fb161f4be56e849ec28447dbe8c382"
+source = "git+https://github.com/XiaoYangx666/bedrock-leveldb.git?branch=main#90206cce2af3152b70de2e4acf55c7c79ce2a42a"
 dependencies = [
  "bytes",
  "flate2",
@@ -95,7 +95,7 @@ dependencies = [
 [[package]]
 name = "bedrock-world"
 version = "0.4.0"
-source = "git+https://github.com/XiaoYangx666/bedrock-world.git?branch=main#4b4f5a8978e2dfbdefbb06e06c769017a5d3c49e"
+source = "git+https://github.com/XiaoYangx666/bedrock-world.git?branch=main#3635d7f7e13adfe385b9fe77eb2975aadd13b11f"
 dependencies = [
  "bedrock-leveldb",
  "bytes",
