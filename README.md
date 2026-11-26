@@ -4,34 +4,34 @@ Minecraft 程序化建筑工具链：**生成 → 预览 → 导出或写入 Jav
 
 `src/` 包含引擎与 CLI。源码仓库提供 [拱门示例](examples/demo-arch/building.ts)，用于演示构建、检查和预览。自己的建筑可放进工作区，并以独立目录或布局 ZIP 分享。
 
-## 在自己的目录使用
+## 快速开始
 
-需要 Node.js 23.6 或更新版本。拿到 `bewright-0.0.1.tgz` 后，在自己的工作目录执行：
+从 GitHub 克隆仓库。需要 Node.js 23.6 或更新版本。
 
-```powershell
-npm init -y
-npm install --save-exact "D:/downloads/bewright-0.0.1.tgz"
-$bewright = './node_modules/bewright/dist/cli/index.js'
-node $bewright init starter
-node $bewright build starter
-node $bewright preview starter --watch
+```sh
+git clone https://github.com/XiaoYangx666/BEWright.git
+cd BEWright
+npm ci
+npm run build
+node dist/cli/index.js build demo-arch
+node dist/cli/index.js preview demo-arch --watch
 ```
 
-已有建筑时，把整个目录放入工作区的 `buildings/`，或直接运行 `node $bewright build ../my-building`。加载建筑会执行目录中的 JS 或 TS，使用可信来源。每座建筑的预览、结构文件和本地世界集中在自己的 `output/`。分享时发送整个建筑目录即可。
+打开预览命令打印的本地地址，即可查看仓库自带的拱门示例。需要导出 Bedrock 结构文件时，在构建命令末尾加 `--export`。
 
-在编辑器里编写 TypeScript 时，工作区可另装 `typescript` 和 `@types/node`，并使用 NodeNext 模块解析。
+运行 `node dist/cli/index.js init starter` 可在 `buildings/starter/` 创建自己的建筑。已有建筑时，可以放入 `buildings/` 或向命令传入其目录路径。加载建筑会执行目录中的 JS 或 TS，使用可信来源。每座建筑的预览、结构文件和本地存档都放在自己的 `output/` 下。建筑可连同所需的共享模块一起分享。[创作入门](docs/authoring-guide.md)
 
-新建筑从 `bewright` 导入 API。使用原有 `blockwright` 导入名的建筑仍可由 `bewright` 加载。
+## 写入世界存档
 
-写世界需要 Rust/Cargo 和本机 C/C++ 编译工具。单建筑使用 `import --local` 后，存档位于该建筑的 `output/bedrock-worlds/` 或 `output/java-worlds/`，可以复制到对应版本的游戏存档目录。
+直接写入世界需要 Rust 写入器。先用 Rust/Cargo 和本机 C/C++ 编译工具构建写入器，再选择目标版本。
 
-```powershell
-node $bewright sidecar build
-node $bewright import starter --local --dry-run
-node $bewright import starter --local
+```sh
+node dist/cli/index.js sidecar build
+node dist/cli/index.js import demo-arch --local
+node dist/cli/index.js import demo-arch --edition java --local
 ```
 
-分享工具时，从源码仓库执行 `npm ci` 和 `npm pack`。包带编译后的 CLI、类型声明和 Rust 写入器源码。分享单个建筑时，发送其目录和它依赖的共享模块即可。
+示例存档分别位于 `examples/demo-arch/output/bedrock-worlds/` 和 `examples/demo-arch/output/java-worlds/`，可以复制到对应版本的游戏存档目录。[世界写入流程](docs/agent-workflows.md)
 
 ## 将多个建筑放进一张地图
 
@@ -43,21 +43,9 @@ node dist/cli/index.js import --layout tour.json --local --folder tour
 node dist/cli/index.js import --layout tour.json --world worlds/bedrock/tour --only east
 ```
 
-最后一条只重导清单中 ID 为 `east` 的实例，写入前会备份 Bedrock 存档。重建整张地图时复用清单，换一个 `--folder` 生成新存档。使用安装包时，将示例中的 `dist/cli/index.js` 换为上面的 `$bewright`。
+最后一条只重导清单中 ID 为 `east` 的实例，写入前会备份 Bedrock 存档。重建整张地图时复用清单，换一个 `--folder` 生成新存档。
 
 分享可编辑的地图源码时，运行 `node dist/cli/index.js pack --layout tour.json`。ZIP 包含清单、引用的建筑和可静态解析的本地模块，解压后可以修改并用 BEWright 重建。[源码打包](docs/cli.md#bewright-pack---layout-file)
-
-## 在源码仓库开发
-
-```powershell
-npm ci
-npm run build                         # 编译工具到 dist/，不生成建筑
-node dist/cli/index.js list --detailed
-node dist/cli/index.js build demo-arch  # 生成模型并执行检查，缓存预览网格
-node dist/cli/index.js preview demo-arch --name demo-arch
-```
-
-`build` 默认只打印构建和检查摘要。需要 `.mcstructure` 时加 `--export`，要留报告时加 `--report`。世界写入按 [执行流程](docs/agent-workflows.md) 选择目标、原点与出生点。工具源码修改后重新编译，建筑 TS 在运行时加载。
 
 ## 能力
 
