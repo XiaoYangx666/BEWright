@@ -1,0 +1,742 @@
+//! Sparse direct-protocol world writer.
+//!
+//! The library's `McStructureFile::write_to_world_blocking` builds one placement
+//! per cell of the structure's bounding box — void cells included — and clones a
+//! full palette entry for each of them, then materializes 4096 owned palette
+//! entries for every subchunk it writes (all-void subchunks included). For a
+//! 74M-cell box carrying 14.5M real blocks that costs ~43 s of placement building
+//! plus ~99 s of chunk writing, and gigabytes of allocation.
+//!
+//! This path walks the payload once with palette *indices*: the JS encoder emits
+//! records grouped by chunk, so one chunk is in memory at a time, and only the
+//! subchunks that actually received a block are encoded. Everything the game
+//! reads back — subchunk palettes, the biome record that carries the height map,
+//! `FinalizedState` and `Version` — still goes through the library's public
+//! types, so the on-disk format stays the library's.
+//!
+//! Only placements without rotation or mirroring use this path; the library
+//! writer still owns directional-state transforms.
+
+use bedrock_world::{
+    block_storage_index, BedrockWorld, BedrockWorldError, Biome2d, Biome3d, BlockPalette,
+    BlockState, Chunk, ChunkKey, ChunkPos, ChunkRecord, ChunkRecordTag, ChunkVersion, Dimension,
+    McStructurePaletteEntry, NbtTag, NbtWriter, Result, SubChunk, SubChunkFormat,
+    WorldStorageHandle, WorldTransaction,
+};
+use indexmap::IndexMap;
+use std::{collections::{BTreeMap, HashSet}, io::Read};
+
+/// Cells in one 16x16x16 subchunk.
+const BLOCKS_PER_SUBCHUNK: usize = 4096;
+/// Subchunk payload version written for new records.
+const SUBCHUNK_FORMAT_VERSION: u8 = 8;
+/// Bedrock block-state version used when a palette entry carries none.
+const DEFAULT_BLOCK_VERSION: i32 = 18_002_711;
+const AIR_BLOCK_NAME: &str = "minecraft:air";
+/// Chunk count between LevelDB commits.
+const COMMITS_PER_BATCH: usize = 16;
+/// Palette index of air in the payload palette; `UNSET` means "nothing written".
+const AIR_INDEX: i32 = 0;
+const UNSET: i32 = -1;
+/// `FinalizedState` value the library writes for edited chunks.
+const FINALIZED_STATE: i32 = 2;
+/// Version byte used when the world has none yet (current `LevelChunk` format).
+const DEFAULT_CHUNK_VERSION: u8 = 42;
+
+pub struct DirectWriteResult {
+    /// Bounding-box volume, reported as `regionCells` by the CLI. Kept under the
+    /// wire name `placedBlocks` because the TypeScript side already maps it there.
+    pub box_blocks: usize,
+    pub affected_chunks: Vec<ChunkPos>,
+    pub initialized_chunks: usize,
+    pub chunk_version: u8,
+}
+
+/// Header and palette of a `BLKWRDIR` payload, read before any world is opened so
+/// a malformed payload never touches a world.
+pub struct Payload<R: Read> {
+    reader: StreamReader<R>,
+    size: [i32; 3],
+    palette: Vec<McStructurePaletteEntry>,
+}
+
+impl<R: Read> Payload<R> {
+    pub fn read(input: R) -> Result<Self> {
+        let mut reader = StreamReader::new(input);
+        if reader.bytes::<8>()? != *b"BLKWRDIR" {
+            return Err(BedrockWorldError::Validation(
+                "invalid direct structure magic".into(),
+            ));
+        }
+        if reader.u32()? != 1 {
+            return Err(BedrockWorldError::Validation(
+                "unsupported direct structure version".into(),
+            ));
+        }
+        let size = [reader.i32()?, reader.i32()?, reader.i32()?];
+        let block_version = reader.i32()?;
+        let palette_count = usize::try_from(reader.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("palette count overflowed".into())
+        })?;
+        let mut palette = Vec::with_capacity(palette_count + 1);
+        palette.push(McStructurePaletteEntry::air());
+        for _ in 0..palette_count {
+            let name = reader.string()?;
+            let state_count = usize::try_from(reader.u32()?).map_err(|_| {
+                BedrockWorldError::Validation("state count overflowed".into())
+            })?;
+            let mut states = BTreeMap::new();
+            for _ in 0..state_count {
+                let key = reader.string()?;
+                let value = match reader.u8()? {
+                    0 => NbtTag::String(reader.string()?),
+                    1 => NbtTag::Int(reader.i32()?),
+                    2 => NbtTag::Byte(if reader.u8()? == 0 { 0 } else { 1 }),
+                    _ => {
+                        return Err(BedrockWorldError::Validation(
+                            "invalid direct state value type".into(),
+                        ));
+                    }
+                };
+                states.insert(key, value);
+            }
+            palette.push(McStructurePaletteEntry {
+                name,
+                states,
+                version: Some(block_version),
+            });
+        }
+        Ok(Self {
+            reader,
+            size,
+            palette,
+        })
+    }
+}
+
+/// Writes every record of the payload, one chunk at a time.
+pub fn write<S: WorldStorageHandle>(
+    world: &BedrockWorld<S>,
+    placement: (i32, i32, i32, Dimension),
+    payload: &mut Payload<impl Read>,
+    initialize_empty_chunks: bool,
+) -> Result<DirectWriteResult> {
+    let (origin_x, origin_y, origin_z, dimension) = placement;
+    let (size_x, size_y, size_z) = (payload.size[0], payload.size[1], payload.size[2]);
+    let block_count = usize::try_from(payload.reader.u32()?).map_err(|_| {
+        BedrockWorldError::Validation("block count overflowed".into())
+    })?;
+
+    // The dense writer records every subchunk layer of the placement box,
+    // including all-air ones. Keep that record set: a finalized chunk that is
+    // missing a layer must not fall back to world generation.
+    let layer_min = i8::try_from(origin_y.div_euclid(16)).map_err(|_| {
+        BedrockWorldError::Validation("box minimum y is not a subchunk index".into())
+    })?;
+    let layer_max = i8::try_from((origin_y + size_y - 1).div_euclid(16)).map_err(|_| {
+        BedrockWorldError::Validation("box maximum y is not a subchunk index".into())
+    })?;
+    let empty_layer = vec![UNSET; BLOCKS_PER_SUBCHUNK];
+
+    let mut transaction = Some(world.transaction());
+    let mut current: Option<(ChunkPos, ChunkAccumulator)> = None;
+    let mut affected_chunks = Vec::new();
+    let mut written = HashSet::new();
+    for _ in 0..block_count {
+        let x = i32::try_from(payload.reader.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("direct x coordinate overflowed".into())
+        })?;
+        let y = i32::try_from(payload.reader.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("direct y coordinate overflowed".into())
+        })?;
+        let z = i32::try_from(payload.reader.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("direct z coordinate overflowed".into())
+        })?;
+        let palette_index = i32::try_from(payload.reader.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("direct palette index overflowed".into())
+        })?;
+        if palette_index <= AIR_INDEX || usize::try_from(palette_index).map_or(true, |index| index >= payload.palette.len())
+        {
+            return Err(BedrockWorldError::Validation(
+                "direct palette index is out of range".into(),
+            ));
+        }
+        let world_x = origin_x
+            .checked_add(x)
+            .ok_or_else(|| BedrockWorldError::Validation("world x overflowed".into()))?;
+        let world_y = origin_y
+            .checked_add(y)
+            .ok_or_else(|| BedrockWorldError::Validation("world y overflowed".into()))?;
+        let world_z = origin_z
+            .checked_add(z)
+            .ok_or_else(|| BedrockWorldError::Validation("world z overflowed".into()))?;
+        let chunk = ChunkPos {
+            x: world_x.div_euclid(16),
+            z: world_z.div_euclid(16),
+            dimension,
+        };
+        if current.as_ref().map(|(pos, _)| *pos) != Some(chunk) {
+            if let Some((previous, accumulator)) = current.take() {
+                flush_chunk(
+                    world,
+                    transaction.as_mut().expect("write transaction"),
+                    previous,
+                    &accumulator,
+                    payload,
+                    (layer_min, layer_max),
+                    &empty_layer,
+                    &mut affected_chunks,
+                )?;
+                if initialize_empty_chunks {
+                    written.insert((previous.x, previous.z));
+                }
+                if affected_chunks.len().is_multiple_of(COMMITS_PER_BATCH) {
+                    transaction.take().expect("write transaction").commit()?;
+                    transaction = Some(world.transaction());
+                }
+            }
+            current = Some((chunk, ChunkAccumulator::default()));
+        }
+        let accumulator = &mut current.as_mut().expect("current chunk").1;
+        accumulator.set(
+            world_y.div_euclid(16),
+            world_x.rem_euclid(16) as u8,
+            world_y.rem_euclid(16) as u8,
+            world_z.rem_euclid(16) as u8,
+            palette_index,
+        )?;
+    }
+    if let Some((previous, accumulator)) = current.take() {
+        flush_chunk(
+            world,
+            transaction.as_mut().expect("write transaction"),
+            previous,
+            &accumulator,
+            payload,
+            (layer_min, layer_max),
+            &empty_layer,
+            &mut affected_chunks,
+        )?;
+        if initialize_empty_chunks {
+            written.insert((previous.x, previous.z));
+        }
+    }
+    // Box columns that received no block still get their all-air layers, the same
+    // set of chunks the dense writer touched.
+    if initialize_empty_chunks {
+        for chunk_x in origin_x.div_euclid(16)..=(origin_x + size_x - 1).div_euclid(16) {
+            for chunk_z in origin_z.div_euclid(16)..=(origin_z + size_z - 1).div_euclid(16) {
+                if written.contains(&(chunk_x, chunk_z)) {
+                    continue;
+                }
+                flush_chunk(
+                    world,
+                    transaction.as_mut().expect("write transaction"),
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                        dimension,
+                    },
+                    &ChunkAccumulator::default(),
+                    payload,
+                    (layer_min, layer_max),
+                    &empty_layer,
+                    &mut affected_chunks,
+                )?;
+                if affected_chunks.len().is_multiple_of(COMMITS_PER_BATCH) {
+                    transaction.take().expect("write transaction").commit()?;
+                    transaction = Some(world.transaction());
+                }
+            }
+        }
+    }
+    transaction.take().expect("write transaction").commit()?;
+
+    let chunk_version = affected_chunks
+        .iter()
+        .filter_map(|pos| world.get_chunk_blocking(*pos).ok()?.version)
+        .next()
+        .unwrap_or(DEFAULT_CHUNK_VERSION);
+    let mut initialized_chunks = 0usize;
+    let mut version_transaction = world.transaction();
+    for pos in &affected_chunks {
+        if world.get_chunk_blocking(*pos)?.version.is_none() {
+            version_transaction.put_raw_record(
+                &ChunkKey::new(*pos, ChunkRecordTag::Version),
+                vec![chunk_version],
+            );
+            initialized_chunks += 1;
+        }
+    }
+    version_transaction.commit()?;
+
+    Ok(DirectWriteResult {
+        box_blocks: usize::try_from(
+            i64::from(size_x) * i64::from(size_y) * i64::from(size_z),
+        )
+        .unwrap_or(0),
+        affected_chunks,
+        initialized_chunks,
+        chunk_version,
+    })
+}
+
+/// One chunk's subchunk layers, as palette indices (`UNSET` where untouched).
+struct ChunkAccumulator {
+    layers: BTreeMap<i8, Vec<i32>>,
+    touched: [bool; 256],
+}
+
+impl Default for ChunkAccumulator {
+    fn default() -> Self {
+        Self {
+            layers: BTreeMap::new(),
+            touched: [false; 256],
+        }
+    }
+}
+
+impl ChunkAccumulator {
+    fn set(
+        &mut self,
+        subchunk_y: i32,
+        local_x: u8,
+        local_y: u8,
+        local_z: u8,
+        palette_index: i32,
+    ) -> Result<()> {
+        let subchunk_y = i8::try_from(subchunk_y).map_err(|_| {
+            BedrockWorldError::Validation(format!(
+                "world y cannot be represented as a subchunk index: {subchunk_y}"
+            ))
+        })?;
+        let layer = self
+            .layers
+            .entry(subchunk_y)
+            .or_insert_with(|| vec![UNSET; BLOCKS_PER_SUBCHUNK]);
+        layer[block_storage_index(local_x, local_y, local_z)] = palette_index;
+        self.touched[usize::from(local_z) * 16 + usize::from(local_x)] = true;
+        Ok(())
+    }
+}
+
+fn flush_chunk<S: WorldStorageHandle>(
+    world: &BedrockWorld<S>,
+    transaction: &mut WorldTransaction<'_, S>,
+    pos: ChunkPos,
+    accumulator: &ChunkAccumulator,
+    payload: &Payload<impl Read>,
+    layers: (i8, i8),
+    empty_layer: &[i32],
+    affected_chunks: &mut Vec<ChunkPos>,
+) -> Result<()> {
+    let existing = world.get_chunk_blocking(pos)?;
+    for subchunk_y in layers.0..=layers.1 {
+        let layer = accumulator
+            .layers
+            .get(&subchunk_y)
+            .map_or(empty_layer, Vec::as_slice);
+        let bytes = encode_subchunk(
+            &payload.palette,
+            layer,
+            existing.get_subchunk(subchunk_y)?.as_ref(),
+        )?;
+        transaction.put_raw_record(&ChunkKey::subchunk(pos, subchunk_y), bytes);
+    }
+    let (version, mut height_map) = read_height_map(&existing.records)?;
+    update_height_map(
+        pos,
+        version,
+        &existing,
+        &payload.palette,
+        &accumulator,
+        &mut height_map,
+    )?;
+    let (tag, bytes) = encode_height_map(&existing.records, height_map)?;
+    transaction.put_raw_record(&ChunkKey::new(pos, tag), bytes);
+    transaction.put_raw_record(
+        &ChunkKey::new(pos, ChunkRecordTag::FinalizedState),
+        FINALIZED_STATE.to_le_bytes().to_vec(),
+    );
+    affected_chunks.push(pos);
+    Ok(())
+}
+
+/// Packs one subchunk from payload palette indices, merging into the chunk that
+/// is already there.
+///
+/// A payload cell that the model never wrote (VOID) keeps the world's existing
+/// block instead of becoming air, and a cell the model did write replaces both
+/// storage layers — so appending to a populated world neither erases terrain nor
+/// leaves stale waterlogging behind a placed block.
+fn encode_subchunk(
+    palette: &[McStructurePaletteEntry],
+    layer: &[i32],
+    existing: Option<&SubChunk>,
+) -> Result<Vec<u8>> {
+    let storages = match existing.map(|subchunk| &subchunk.format) {
+        Some(SubChunkFormat::Paletted { storages, .. }) => storages.as_slice(),
+        Some(_) => {
+            return Err(BedrockWorldError::UnsupportedChunkFormat(
+                "existing subchunk is not a mergeable paletted format".to_string(),
+            ));
+        }
+        None => &[],
+    };
+    let secondary_used = storages.get(1).is_some_and(|storage| {
+        storage
+            .states
+            .iter()
+            .any(|state| state.name != AIR_BLOCK_NAME)
+    });
+
+    let air = McStructurePaletteEntry::air();
+    let mut states: Vec<PaletteRef> = vec![PaletteRef::Payload(&air)];
+    let existing_primary = map_existing(storages.first(), &mut states)?;
+    let mut payload_map = vec![u16::MAX; palette.len()];
+    let mut indices = Vec::with_capacity(BLOCKS_PER_SUBCHUNK);
+    for (cell, &global) in layer.iter().enumerate() {
+        let local = if global > AIR_INDEX {
+            let entry = &palette[usize::try_from(global).expect("checked by the caller")];
+            if entry.name == AIR_BLOCK_NAME {
+                0
+            } else if payload_map[usize::try_from(global).expect("checked")] != u16::MAX {
+                payload_map[usize::try_from(global).expect("checked")]
+            } else {
+                let index = push_state(&mut states, PaletteRef::Payload(entry))?;
+                payload_map[usize::try_from(global).expect("checked")] = index;
+                index
+            }
+        } else {
+            existing_local_index(storages.first(), &existing_primary, cell)
+        };
+        indices.push(local);
+    }
+
+    let mut bytes = Vec::with_capacity(2 + BLOCKS_PER_SUBCHUNK * 2 + states.len() * 32);
+    bytes.push(SUBCHUNK_FORMAT_VERSION);
+    bytes.push(if secondary_used { 2 } else { 1 });
+    bytes.extend_from_slice(&encode_layer(&states, &indices)?);
+
+    if secondary_used {
+        let storage = storages.get(1).expect("secondary storage");
+        let mut secondary_states: Vec<PaletteRef> = vec![PaletteRef::Payload(&air)];
+        let secondary_map = map_existing(Some(storage), &mut secondary_states)?;
+        let mut secondary_indices = Vec::with_capacity(BLOCKS_PER_SUBCHUNK);
+        for (cell, &global) in layer.iter().enumerate() {
+            // Placing a block clears whatever occupied the second layer there.
+            secondary_indices.push(if global > AIR_INDEX {
+                0
+            } else {
+                existing_local_index(Some(storage), &secondary_map, cell)
+            });
+        }
+        bytes.extend_from_slice(&encode_layer(&secondary_states, &secondary_indices)?);
+    }
+    Ok(bytes)
+}
+
+/// A palette entry from either the payload or the world being merged into.
+#[derive(Clone, Copy)]
+enum PaletteRef<'a> {
+    Payload(&'a McStructurePaletteEntry),
+    Existing(&'a BlockState),
+}
+
+impl PaletteRef<'_> {
+    fn nbt(&self) -> NbtTag {
+        let (name, states, version) = match self {
+            Self::Payload(entry) => (&entry.name, &entry.states, entry.version),
+            Self::Existing(state) => (&state.name, &state.states, state.version),
+        };
+        NbtTag::Compound(IndexMap::from([
+            ("name".to_string(), NbtTag::String(name.clone())),
+            (
+                "states".to_string(),
+                NbtTag::Compound(
+                    states
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+            ),
+            (
+                "version".to_string(),
+                NbtTag::Int(version.unwrap_or(DEFAULT_BLOCK_VERSION)),
+            ),
+        ]))
+    }
+}
+
+fn push_state<'a>(states: &mut Vec<PaletteRef<'a>>, state: PaletteRef<'a>) -> Result<u16> {
+    let index = u16::try_from(states.len()).map_err(|_| {
+        BedrockWorldError::Validation("subchunk palette is too large".into())
+    })?;
+    states.push(state);
+    Ok(index)
+}
+
+/// Maps each existing storage palette index to a local one; air maps to nothing.
+fn map_existing<'a>(
+    storage: Option<&'a BlockPalette>,
+    states: &mut Vec<PaletteRef<'a>>,
+) -> Result<Vec<Option<u16>>> {
+    let Some(storage) = storage else {
+        return Ok(Vec::new());
+    };
+    let mut map = Vec::with_capacity(storage.states.len());
+    for state in &storage.states {
+        if state.name == AIR_BLOCK_NAME {
+            map.push(None);
+        } else {
+            map.push(Some(push_state(states, PaletteRef::Existing(state))?));
+        }
+    }
+    Ok(map)
+}
+
+/// Local palette index of the block already stored at `cell`, or air.
+fn existing_local_index(
+    storage: Option<&BlockPalette>,
+    map: &[Option<u16>],
+    cell: usize,
+) -> u16 {
+    let Some(storage) = storage else { return 0 };
+    // Bedrock storage order is X-major: x * 256 + z * 16 + y.
+    let (local_x, local_z, local_y) = (
+        (cell / 256) as u8,
+        ((cell / 16) % 16) as u8,
+        (cell % 16) as u8,
+    );
+    storage
+        .palette_index_at(local_x, local_y, local_z)
+        .and_then(|index| map.get(usize::from(index)).copied().flatten())
+        .unwrap_or(0)
+}
+
+/// Serializes one storage layer: bit width, packed indices, palette size, NBT.
+fn encode_layer(states: &[PaletteRef<'_>], indices: &[u16]) -> Result<Vec<u8>> {
+    let bits = bits_per_palette_index(states.len())?;
+    let mut bytes = Vec::new();
+    bytes.push(bits << 1);
+    if bits > 0 {
+        for word in pack_palette_indices(indices, bits)? {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let length = i32::try_from(states.len()).map_err(|_| {
+            BedrockWorldError::Validation("subchunk palette length does not fit i32".into())
+        })?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+    }
+    for state in states {
+        bytes.extend_from_slice(&NbtWriter::write_root(&state.nbt())?);
+    }
+    Ok(bytes)
+}
+
+fn bits_per_palette_index(palette_len: usize) -> Result<u8> {
+    match palette_len {
+        0 | 1 => Ok(0),
+        2 => Ok(1),
+        3..=4 => Ok(2),
+        5..=8 => Ok(3),
+        9..=16 => Ok(4),
+        17..=32 => Ok(5),
+        33..=64 => Ok(6),
+        65..=256 => Ok(8),
+        257..=4096 => Ok(16),
+        _ => Err(BedrockWorldError::Validation(format!(
+            "subchunk palette length exceeds 4096: {palette_len}"
+        ))),
+    }
+}
+
+fn pack_palette_indices(indices: &[u16], bits: u8) -> Result<Vec<u32>> {
+    if bits == 0 {
+        return Ok(Vec::new());
+    }
+    let values_per_word = usize::from(32 / bits);
+    let mask = (1_u32 << bits) - 1;
+    let mut words = vec![0_u32; indices.len().div_ceil(values_per_word)];
+    for (index, value) in indices.iter().enumerate() {
+        let value = u32::from(*value);
+        if value > mask {
+            return Err(BedrockWorldError::Validation(format!(
+                "palette index {value} does not fit {bits} bits"
+            )));
+        }
+        words[index / values_per_word] |= value << ((index % values_per_word) * usize::from(bits));
+    }
+    Ok(words)
+}
+
+/// The height map lives inside the biome record, so it is read back from there.
+fn read_height_map(records: &[ChunkRecord]) -> Result<(ChunkVersion, Vec<i16>)> {
+    for record in records {
+        match record.key.tag {
+            ChunkRecordTag::Data3D => {
+                return Biome3d::parse(&record.value)
+                    .map(|biome| (ChunkVersion::New, biome.height_map));
+            }
+            ChunkRecordTag::Data2D | ChunkRecordTag::Data2DLegacy => {
+                return Biome2d::parse(&record.value)
+                    .map(|biome| (ChunkVersion::Old, biome.height_map));
+            }
+            _ => {}
+        }
+    }
+    Ok((ChunkVersion::New, vec![0; 256]))
+}
+
+fn encode_height_map(
+    records: &[ChunkRecord],
+    height_map: Vec<i16>,
+) -> Result<(ChunkRecordTag, Vec<u8>)> {
+    for record in records {
+        match record.key.tag {
+            ChunkRecordTag::Data3D => {
+                let biome = Biome3d::parse(&record.value)?;
+                return Ok((
+                    ChunkRecordTag::Data3D,
+                    Biome3d::new(height_map, biome.storages)?.encode()?,
+                ));
+            }
+            ChunkRecordTag::Data2D | ChunkRecordTag::Data2DLegacy => {
+                let biome = Biome2d::parse(&record.value)?;
+                return Ok((
+                    record.key.tag,
+                    Biome2d::new(height_map, biome.biomes)?.encode()?,
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok((
+        ChunkRecordTag::Data3D,
+        Biome3d::new(height_map, Vec::new())?.encode()?,
+    ))
+}
+
+/// Raises the height map of every column this chunk actually wrote a block in.
+fn update_height_map(
+    pos: ChunkPos,
+    version: ChunkVersion,
+    existing: &Chunk,
+    palette: &[McStructurePaletteEntry],
+    accumulator: &ChunkAccumulator,
+    height_map: &mut [i16],
+) -> Result<()> {
+    let (min_y, max_y) = pos.y_range(version);
+    let mut unresolved = accumulator.touched.iter().filter(|touched| **touched).count();
+    let mut resolved = [false; 256];
+    for subchunk_y in (min_y.div_euclid(16)..=max_y.div_euclid(16)).rev() {
+        if unresolved == 0 {
+            break;
+        }
+        let subchunk_y = i8::try_from(subchunk_y).map_err(|_| {
+            BedrockWorldError::Validation(format!(
+                "chunk {},{} has an invalid subchunk index",
+                pos.x, pos.z
+            ))
+        })?;
+        let updated = accumulator.layers.get(&subchunk_y);
+        // Layers this write did not touch still hold blocks; only decode them when
+        // a column is still unresolved, which never happens in a fresh world.
+        let untouched = if updated.is_none() {
+            existing.get_subchunk(subchunk_y)?
+        } else {
+            None
+        };
+        for local_z in 0..16_u8 {
+            for local_x in 0..16_u8 {
+                let column_index = usize::from(local_z) * 16 + usize::from(local_x);
+                if !accumulator.touched[column_index] || resolved[column_index] {
+                    continue;
+                }
+                for local_y in (0..16_u8).rev() {
+                    let storage_index = block_storage_index(local_x, local_y, local_z);
+                    let is_air = match updated {
+                        Some(layer) => {
+                            let global = layer[storage_index];
+                            global <= AIR_INDEX
+                                || palette
+                                    .get(usize::try_from(global).unwrap_or(usize::MAX))
+                                    .is_none_or(|entry| entry.name == AIR_BLOCK_NAME)
+                        }
+                        None => untouched
+                            .as_ref()
+                            .is_none_or(|subchunk| existing_cell_is_air(subchunk, local_x, local_y, local_z)),
+                    };
+                    if !is_air {
+                        let surface_y = i32::from(subchunk_y) * 16 + i32::from(local_y);
+                        height_map[column_index] = i16::try_from(surface_y - min_y).map_err(|_| {
+                            BedrockWorldError::Validation(format!(
+                                "chunk {},{} surface height {surface_y} is out of range",
+                                pos.x, pos.z
+                            ))
+                        })?;
+                        resolved[column_index] = true;
+                        unresolved = unresolved.saturating_sub(1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for (column_index, touched) in accumulator.touched.iter().enumerate() {
+        if *touched && !resolved[column_index] {
+            height_map[column_index] = 0;
+        }
+    }
+    Ok(())
+}
+
+fn existing_cell_is_air(subchunk: &SubChunk, local_x: u8, local_y: u8, local_z: u8) -> bool {
+    match &subchunk.format {
+        SubChunkFormat::Paletted { storages, .. } => storages
+            .iter()
+            .take(2)
+            .filter_map(|storage| storage.block_state_at(local_x, local_y, local_z))
+            .all(|state| state.name == AIR_BLOCK_NAME),
+        _ => true,
+    }
+}
+
+/// Minimal exact-length reader over a pipe; the payload is consumed once.
+struct StreamReader<R: Read> {
+    inner: R,
+}
+
+impl<R: Read> StreamReader<R> {
+    fn new(inner: R) -> Self {
+        Self { inner }
+    }
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut buffer = [0_u8; N];
+        self.inner
+            .read_exact(&mut buffer)
+            .map_err(BedrockWorldError::Io)?;
+        Ok(buffer)
+    }
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.bytes::<1>()?[0])
+    }
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.bytes::<4>()?))
+    }
+    fn i32(&mut self) -> Result<i32> {
+        Ok(i32::from_le_bytes(self.bytes::<4>()?))
+    }
+    fn string(&mut self) -> Result<String> {
+        let len = usize::try_from(self.u32()?).map_err(|_| {
+            BedrockWorldError::Validation("direct string length overflowed".into())
+        })?;
+        let mut buffer = vec![0_u8; len];
+        self.inner
+            .read_exact(&mut buffer)
+            .map_err(BedrockWorldError::Io)?;
+        String::from_utf8(buffer).map_err(|_| {
+            BedrockWorldError::Validation("direct structure contains invalid UTF-8".into())
+        })
+    }
+}

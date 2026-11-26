@@ -1,0 +1,95 @@
+{
+  "name": "bewright",
+  "version": "0.0.1",
+  "type": "module",
+  "files": [
+    "dist/",
+    "docs/",
+    "src/blocks/generated/README.md",
+    "tools/blockwright-world/Cargo.toml",
+    "tools/blockwright-world/Cargo.lock",
+    "tools/blockwright-world/src/"
+  ],
+  "bin": {
+    "bewright": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "bewright-src": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "bewright-src": "./src/core/index.ts",
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./blocks": {
+      "bewright-src": "./src/blocks/index.ts",
+      "types": "./dist/blocks/index.d.ts",
+      "import": "./dist/blocks/index.js"
+    },
+    "./mesh": {
+      "bewright-src": "./src/mesh/index.ts",
+      "types": "./dist/mesh/index.d.ts",
+      "import": "./dist/mesh/index.js"
+    },
+    "./preview": {
+      "bewright-src": "./src/preview/index.ts",
+      "types": "./dist/preview/index.d.ts",
+      "import": "./dist/preview/index.js"
+    },
+    "./targets": {
+      "bewright-src": "./src/targets/index.ts",
+      "types": "./dist/targets/index.d.ts",
+      "import": "./dist/targets/index.js"
+    },
+    "./authoring": {
+      "bewright-src": "./src/authoring/index.ts",
+      "types": "./dist/authoring/index.d.ts",
+      "import": "./dist/authoring/index.js"
+    },
+    "./project": {
+      "bewright-src": "./src/project/index.ts",
+      "types": "./dist/project/index.d.ts",
+      "import": "./dist/project/index.js"
+    },
+    "./content": {
+      "bewright-src": "./src/content/index.ts",
+      "types": "./dist/content/index.d.ts",
+      "import": "./dist/content/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "prepack": "npm run build",
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "node --conditions=bewright-src --import tsx --test \"tests/engine/**/*.test.ts\"",
+    "test:engine": "npm test",
+    "bewright": "node dist/cli/index.js"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "dependencies": {
+    "es-module-lexer": "3.0.5",
+    "fflate": "0.8.3",
+    "nbtify": "2.2.0",
+    "playwright": "1.63.0",
+    "prismarine-nbt": "2.8.0",
+    "simplex-noise": "4.0.3",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.1",
+    "@types/three": "0.185.4",
+    "minecraft-data": "3.115.0",
+    "prettier": "3.9.6",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  },
+  "description": "Procedural Minecraft building, preview and Java / Bedrock world tools."
+}

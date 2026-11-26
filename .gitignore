@@ -1,0 +1,33 @@
+# 依赖与运行时
+node_modules/
+.npm-cache/
+
+# 可重建产物（由 generate/preview/deliver 生成）
+cache/
+artifacts/
+**/buildings/*/output/
+/examples/*/output/
+tools/**/target/
+
+# Rust / 二进制
+*.exe
+*.pdb
+*.rlib
+
+# 工作区生成的世界与机器本地配置
+/worlds/
+/blockwright.local.json
+/buildings/
+/catalog/
+
+# 构建与测试
+coverage/
+dist/
+/bewright-*.tgz
+
+# 临时与编辑器文件
+.tmp-*/
+*.tmp
+*.log
+.DS_Store
+Thumbs.db

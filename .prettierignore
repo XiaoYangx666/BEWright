@@ -1,0 +1,12 @@
+# Generated data: hand-packed format, must not be reformatted.
+src/blocks/generated/
+
+# Build and runtime output
+dist/
+artifacts/
+cache/
+worlds/
+tools/**/target/
+
+node_modules/
+package-lock.json

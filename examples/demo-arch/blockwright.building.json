@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-arch",
+  "name": "Demo Arch",
+  "entry": "./building.ts",
+  "editions": [
+    "bedrock",
+    "java"
+  ]
+}
