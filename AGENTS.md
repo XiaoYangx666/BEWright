@@ -28,7 +28,7 @@
 ## 外部副作用
 
 - 只在本地或我们自己的 fork 改。未经用户当次明确授权，不向上游仓库 push、开 PR、开 issue 或发表评论。
-- 上游依赖需要改动时，改 `XiaoYangx666/bedrock-world` fork，并把 `Cargo.toml` 的 `bedrock-world` 依赖 pin 到该 fork 的 commit；不向上游提 PR。
+- 上游依赖需要改动时，改我们自己的 fork：`XiaoYangx666/bedrock-world`（`/server/mcdev/bedrock-world`）和 `XiaoYangx666/bedrock-leveldb`（`/server/mcdev/bedrock-leveldb`），并把 `Cargo.toml` 的依赖 pin 到 fork 的 commit；不向上游提 PR。各 fork 的改动与约定见仓库内 `AGENTS.md`。
 - 本地修复不代表上游需要，也可能不完整或不正确；是否上游化由用户 review 后决定。
 - 绕过上游缺陷的改动放在本仓库（`tools/`、sidecar 等）或本地补丁里，并在说明中写明原因。
 
