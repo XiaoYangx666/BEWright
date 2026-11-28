@@ -427,7 +427,7 @@ node dist/cli/index.js clean --game --keep 1
 
 `blockwright.config.json` 可以提交并共享。机器专用的存档路径可记在同目录的 `blockwright.local.json`，由工作区的 Git 忽略规则排除。本地配置按版本覆盖 `worldDirectories`，并可覆盖 `contentRoots`。`BLOCKWRIGHT_CONFIG` 可直接指定一份配置。配置内的相对路径从该文件所在目录解析。
 
-建筑项目可以用下面的配置把源码与生成产物分开。
+可以复制 [建筑项目范本](../examples/building-project/README.md)，也可以在自己的项目里用下面的配置把源码与生成产物分开。
 
 ```json
 {

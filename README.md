@@ -21,6 +21,8 @@ node dist/cli/index.js preview demo-arch --watch
 
 运行 `node dist/cli/index.js init starter` 可在 `buildings/starter/` 创建自己的建筑。已有建筑时，可以放入 `buildings/` 或向命令传入其目录路径。加载建筑会执行目录中的 JS 或 TS，使用可信来源。每座建筑的预览、结构文件和本地存档都放在自己的 `output/` 下。建筑可连同所需的共享模块一起分享。[创作入门](docs/authoring-guide.md)
 
+需要持续开发一张地图时，可复制 [建筑项目范本](examples/building-project/README.md)。范本包含一个可预览的小建筑和地图布局，使用 `src/` 管理源码、`dist/` 收集产物、`cache/` 保存缓存，并提供首次导入和后续差量部署的命令。
+
 ## 写入世界存档
 
 直接写入世界需要 Rust 写入器。先用 Rust/Cargo 和本机 C/C++ 编译工具构建写入器，再选择目标版本。
@@ -69,7 +71,7 @@ Agent 从 [AGENTS.md](AGENTS.md) 开始；完整导航与各文档职责见 [文
 ```text
 src/          工具源码和 CLI
 tools/        编译脚本和 Rust 写入器源码
-examples/     可直接运行的拱门示例
+examples/     拱门示例和可复制的建筑项目范本
 tests/        引擎测试
 docs/         使用和开发文档
 ```

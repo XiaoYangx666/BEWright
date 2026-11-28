@@ -1,0 +1,6 @@
+/node_modules/
+/dist/
+/cache/
+/worlds/
+/.bewright/
+/blockwright.local.json

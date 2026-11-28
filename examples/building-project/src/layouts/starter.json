@@ -1,0 +1,12 @@
+{
+  "name": "Starter Project",
+  "spawn": [4, -59, 1],
+  "seed": 0,
+  "placements": [
+    {
+      "id": "entrance",
+      "building": "../buildings/starter-arch",
+      "origin": [0, -60, 0]
+    }
+  ]
+}

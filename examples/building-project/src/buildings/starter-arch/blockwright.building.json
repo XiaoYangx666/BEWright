@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "starter-arch",
+  "name": "starter-arch",
+  "entry": "./building.mts",
+  "editions": [
+    "bedrock",
+    "java"
+  ]
+}
