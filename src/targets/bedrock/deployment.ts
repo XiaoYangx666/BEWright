@@ -98,6 +98,8 @@ function stateKey(state: State | null | undefined) {
     .filter(([key]) => {
       const property = key.replace(/^minecraft:/, '');
       if (name.endsWith('_stairs') && property === 'corner') return false;
+      // The game derives the dust's side connections from neighboring blocks.
+      if (name === 'minecraft:redstone_wire' && /^redstone_(east|north|south|west)$/.test(property)) return false;
       const connects = name.endsWith('_fence') || name.endsWith('_pane') || name === 'minecraft:iron_bars';
       return !connects || !/^connection_(east|north|south|west)$/.test(property);
     })
