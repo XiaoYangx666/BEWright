@@ -11,7 +11,8 @@
     "tools/blockwright-world/src/"
   ],
   "bin": {
-    "bewright": "./dist/cli/index.js"
+    "bewright": "./dist/cli/index.js",
+    "bw": "./dist/cli/index.js"
   },
   "exports": {
     ".": {
