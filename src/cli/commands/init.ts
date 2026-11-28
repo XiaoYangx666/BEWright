@@ -3,15 +3,17 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { BUILDING_MANIFEST, DEFAULT_CONTENT_ROOT, isBuildingId } from '../../content/discover.js';
 import { BEWRIGHT_PACKAGE } from '../../content/package-name.js';
+import { loadBlockwrightConfig } from '../../project/config.js';
 
 export const INIT_HELP = `bewright init [id] [--name NAME]
 
-  Create a starter building under buildings/<id>/ in the current workspace.
+  Create a starter building under the configured sourceRoot (default: buildings/).
   The default id is starter. Creates a workspace .gitignore if one is missing.`;
 
 const WORKSPACE_IGNORE = [
   '/node_modules/',
   '/artifacts/',
+  '/dist/',
   '**/buildings/*/output/',
   '/cache/',
   '/worlds/',
@@ -31,7 +33,8 @@ export async function initCommand(argv: string[]) {
   const name = values.name?.trim() ?? (id === 'starter' ? 'Starter Arch' : id);
   if (!name) throw new Error('Building name cannot be blank');
 
-  const root = resolve(DEFAULT_CONTENT_ROOT, id);
+  const { sourceRoot } = await loadBlockwrightConfig(undefined, { absolutePaths: true });
+  const root = resolve(sourceRoot ?? DEFAULT_CONTENT_ROOT, id);
   await mkdir(dirname(root), { recursive: true });
   await mkdir(root).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EEXIST') throw new Error(`Building directory already exists: ${root}`);

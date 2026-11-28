@@ -176,7 +176,7 @@ export async function runBuild(loaded: LoadedBuilding, request: BuildRequest = {
   const project = request.project ?? DEFAULT_PROJECT;
   const managedOutput = request.buildingOutput === true && request.artifactDir === undefined;
   const artifactDir = managedOutput
-    ? buildingOutputDir(loaded, request.export ? 'bedrock' : 'diagnostics')
+    ? await buildingOutputDir(loaded, request.export ? 'bedrock' : 'diagnostics', project)
     : outputDir(project, request.artifactDir ?? definition.artifacts, join(project.artifacts, definition.id));
   const cacheDir = outputDir(
     project,

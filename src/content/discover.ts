@@ -41,7 +41,7 @@ export const isBuildingId = (id: unknown): id is string => typeof id === 'string
 
 /**
  * Content roots in precedence order: explicit `--content`, then the
- * BLOCKWRIGHT_CONTENT_PATH list, then blockwright.config.json, then `buildings/`.
+ * BLOCKWRIGHT_CONTENT_PATH list, then configured content roots, then sourceRoot or `buildings/`.
  */
 export async function resolveContentRoots(options: ContentOptions = {}): Promise<ContentRoot[]> {
   const roots: ContentRoot[] = [];
@@ -53,9 +53,10 @@ export async function resolveContentRoots(options: ContentOptions = {}): Promise
   for (const root of options.roots ?? []) push(root, '--content');
   for (const root of (process.env.BLOCKWRIGHT_CONTENT_PATH ?? '').split(delimiter))
     push(root, 'BLOCKWRIGHT_CONTENT_PATH');
-  for (const root of (await loadBlockwrightConfig(undefined, { absolutePaths: true })).contentRoots ?? [])
+  const config = await loadBlockwrightConfig(undefined, { absolutePaths: true });
+  for (const root of config.contentRoots ?? [])
     push(root, 'blockwright.config.json');
-  push(DEFAULT_CONTENT_ROOT, 'default');
+  push(config.sourceRoot ?? DEFAULT_CONTENT_ROOT, config.sourceRoot ? 'sourceRoot' : 'default');
   return roots;
 }
 

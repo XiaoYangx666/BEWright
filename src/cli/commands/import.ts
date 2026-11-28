@@ -112,7 +112,7 @@ export async function importCommand(argv: string[]) {
     throw new Error(`Building "${loaded.definition.id}" does not declare the ${edition} edition`);
   const worldsRoot = values.local
     ? loaded
-      ? buildingOutputDir(loaded, edition === 'java' ? 'java-worlds' : 'bedrock-worlds')
+      ? await buildingOutputDir(loaded, edition === 'java' ? 'java-worlds' : 'bedrock-worlds')
       : join(WORLD_ROOT, edition)
     : values['worlds-dir'];
 

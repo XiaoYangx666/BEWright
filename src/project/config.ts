@@ -6,6 +6,8 @@ export type BlockwrightConfig = Readonly<{
   worldDirectories?: Readonly<Partial<Record<MinecraftEdition, string | null>>>;
   /** Extra building content roots, searched before the default `buildings/`. */
   contentRoots?: readonly string[];
+  sourceRoot?: string;
+  outputRoot?: string;
 }>;
 
 export const DEFAULT_CONFIG_PATH = 'blockwright.config.json';
@@ -35,6 +37,11 @@ async function readConfig(configPath: string, absolutePaths: boolean): Promise<B
       config.contentRoots.some((root) => typeof root !== 'string' || !root.trim()))
   )
     throw new Error(`contentRoots must be an array of nonempty paths in ${configPath}`);
+  for (const key of ['sourceRoot', 'outputRoot'] as const) {
+    const path = config[key];
+    if (path !== undefined && (typeof path !== 'string' || !path.trim()))
+      throw new Error(`${key} must be a nonempty path in ${configPath}`);
+  }
   if (!absolutePaths) return config;
   const root = dirname(configPath);
   const worldDirectories: Partial<Record<MinecraftEdition, string | null>> = {};
@@ -45,16 +52,18 @@ async function readConfig(configPath: string, absolutePaths: boolean): Promise<B
   return {
     ...(config.worldDirectories && { worldDirectories }),
     ...(config.contentRoots && { contentRoots: config.contentRoots.map((path) => resolve(root, path)) }),
+    ...(config.sourceRoot && { sourceRoot: resolve(root, config.sourceRoot) }),
+    ...(config.outputRoot && { outputRoot: resolve(root, config.outputRoot) }),
   };
 }
 
 export async function loadBlockwrightConfig(
   path = process.env.BLOCKWRIGHT_CONFIG,
-  { absolutePaths = false } = {},
+  { absolutePaths = false, root = process.cwd() } = {},
 ): Promise<BlockwrightConfig> {
-  if (path !== undefined) return readConfig(resolve(path), absolutePaths);
-  const config = await readConfig(resolve(DEFAULT_CONFIG_PATH), absolutePaths);
-  const local = await readConfig(resolve(LOCAL_CONFIG_PATH), absolutePaths);
+  if (path !== undefined) return readConfig(resolve(root, path), absolutePaths);
+  const config = await readConfig(resolve(root, DEFAULT_CONFIG_PATH), absolutePaths);
+  const local = await readConfig(resolve(root, LOCAL_CONFIG_PATH), absolutePaths);
   return {
     ...config,
     ...local,

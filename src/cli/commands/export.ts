@@ -79,7 +79,7 @@ export async function exportCommand(argv: string[]) {
     const report = await exportJavaWorld(world, loaded.definition.bounds, {
       name: values.name ?? loaded.definition.name,
       output: values.output,
-      worldsDir: values['worlds-dir'] ?? buildingOutputDir(loaded, 'java-worlds'),
+      worldsDir: values['worlds-dir'] ?? (await buildingOutputDir(loaded, 'java-worlds')),
       folderName: values.folder ?? (values['worlds-dir'] ? undefined : loaded.definition.id),
       spawn,
       seed,

@@ -193,7 +193,7 @@ export async function previewCommand(argv: string[], capture?: (snapshot: Previe
     throw new Error('--port/--watch-path require --watch');
   if (!watch && values.agent) throw new Error('--agent requires --watch'); // unreachable; agent implies watch
   const loaded = await loadBuilding(await findBuilding(id, contentOptions(values)));
-  const previewDir = values.out ? resolve(values.out) : buildingOutputDir(loaded, 'previews');
+  const previewDir = values.out ? resolve(values.out) : await buildingOutputDir(loaded, 'previews');
   if (values.report) cli.reportDir = previewDir;
   const declared = loaded.definition.views ?? [];
 

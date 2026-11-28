@@ -17,7 +17,7 @@ node dist/cli/index.js <command> [options]  # 仓库内推荐，不需要全局�
 
 ## `bewright init [id]`
 
-在当前目录下建立 `buildings/<id>/`，包含最小清单和 `building.mts`。默认 id 为 `starter`，可用 `--name` 指定显示名称。首次运行时，如果没有 `.gitignore`，会创建一份用于排除本地配置和生成目录。建筑目录已存在时退出，保留已有文件。
+在工作区的源码根下建立 `<id>/`，包含最小清单和 `building.mts`。源码根默认是 `buildings/`，可通过 `sourceRoot` 指定。默认 id 为 `starter`，可用 `--name` 指定显示名称。首次运行时，如果没有 `.gitignore`，会创建一份用于排除本地配置和生成目录。建筑目录已存在时退出，保留已有文件。
 
 ## `bewright list`
 
@@ -426,6 +426,17 @@ node dist/cli/index.js clean --game --keep 1
 ## 工作区配置
 
 `blockwright.config.json` 可以提交并共享。机器专用的存档路径可记在同目录的 `blockwright.local.json`，由工作区的 Git 忽略规则排除。本地配置按版本覆盖 `worldDirectories`，并可覆盖 `contentRoots`。`BLOCKWRIGHT_CONFIG` 可直接指定一份配置。配置内的相对路径从该文件所在目录解析。
+
+建筑项目可以用下面的配置把源码与生成产物分开。
+
+```json
+{
+  "sourceRoot": "src/buildings",
+  "outputRoot": "dist"
+}
+```
+
+`sourceRoot` 同时供建筑发现与 `init` 使用，缺省时为 `buildings`。`outputRoot` 把预览、结构、诊断和单建筑导出的存档按类型及建筑 ID 写到统一目录，例如 `dist/previews/demo-arch/`。源码包放在 `dist/packages/`。显式指定的输出位置优先。已有地图的位置由部署目标指定，缓存使用工作区的 `cache/`。
 
 ## 环境变量
 
