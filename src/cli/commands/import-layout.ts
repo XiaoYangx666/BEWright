@@ -135,7 +135,8 @@ export async function importLayout(options: LayoutImportOptions) {
     mode: existing ? 'existing-world' : 'new-world',
     name: existing ? (await readFile(join(destination, 'levelname.txt'), 'utf8').catch(() => null))?.trim() ?? null : name,
     spawn: existing ? null : spawn, seed: existing ? null : seed,
-    placements: model.placements, bounds: model.bounds, cells: model.cells, explicitAir: model.explicitAir,
+    placements: model.placements.map(({ offset: _offset, ...placement }) => placement),
+    bounds: model.bounds, cells: model.cells, explicitAir: model.explicitAir,
     worldOverwrites: overwrites,
     gameVerified: false,
   };

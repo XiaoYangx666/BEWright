@@ -307,6 +307,45 @@ node dist/cli/index.js import --layout tour.json --edition java --local --folder
 
 清单的 `--dry-run` 会生成组合模型。每项的 `overlaps` 统计覆盖前列实例的格数，顶层的 `explicitAir` 统计最终模型里的显式空气。已有 Bedrock 存档在写入前整档备份一次，写入失败时错误会给出备份路径。Java 需要新存档目录。首次使用清单写入 Bedrock 时，先运行 `node dist/cli/index.js sidecar build` 更新写入器。
 
+## 持续开发已有 Bedrock 地图
+
+用一个具名目标绑定当前工作区中的布局和具体存档。初次接入已有地图时，先确认清单落点与存档对应，再用作为生成参照的源码建立基线。对已有地图，`--adopt` 保留所有现场改动，只记录当前源码各实例的生成结果。
+
+```powershell
+bewright sidecar build
+bewright target add dev --layout layouts/tour/layout.json --world worlds/bedrock/tour
+bewright diff dev --only east
+bewright deploy dev --adopt
+
+# 修改建筑源码后
+bewright deploy dev --only east --dry-run
+bewright deploy dev --only east
+bewright deploy dev
+```
+
+只有一个已注册目标时，`deploy` 和 `diff` 可以省略目标名。`bewright target list` 列出已注册目标。`--only` 接收清单中的实例 ID，支持逗号和重复参数。只选部分实例时，未选实例沿用上次部署的内容和叠放优先级。增加、删除或重新排序实例时运行整图部署。
+
+部署比较上次源码结果、本次源码结果和存档当前方块。只写源码变更的位置，已有存档独有的改动默认保留。如果同一位置的新源码与存档改动不同，默认在写入前停止。可以重新修改源码，或者用 `--on-conflict keep-world` 保留所有冲突位置、部署其余变更，或用 `--on-conflict use-source` 在冲突位置采用源码。两种选择均推进源码基线。`--dry-run` 不写地图或基线，冲突阻断返回退出码 1。
+
+源码显式写空气会清理原方块。源码改为不写某格时，若有下层实例，部署会重新露出下层。否则默认解除管理并保留原值，显式使用 `--clear-removed` 才会计划清理，并仍检查冲突。被解除管理的旧建筑不会在下一次部署时被自动清理。
+
+部署前要关闭 Minecraft 或 BDS 中的目标世界。实际有方块写入时会先整档备份，默认在 `.bewright/backups/<目标名>/`，也可用 `--backup-dir` 指定位置。写入器会在持有世界写句柄时重新校验待写格，遇到方块实体或副层方块时中止。成功回读验证后才替换源码基线。存档或设备故障导致写入中断时，可在关闭世界后检查备份，或用原来的源码变更重新预演。目标配置和基线位于本地 `.bewright/targets/`，请将 `.bewright/` 排除在 Git 之外。
+
+```powershell
+bewright diff dev --only east --report east-diff.json
+```
+
+`diff` 将存档主层方块与当前源码比较，按改名或改状态、缺块、显式空气被占用、源码未管理等类别统计。报告样本附带世界坐标、归属实例及反向变换到建筑源码的局部坐标。`--limit N` 控制每类样本数，`--json` 输出 JSON，`--report FILE` 将结果保存到文件。差异比较和部署规划通过管道读取方块调色板和索引，部署写入器在持锁期间校验写入的方块及状态。当前工作流支持主世界的主层方块。游戏加载和游玩仍需实机验收。
+
+### 按需将存档区域导出为结构文件
+
+需要单独交付一个结构文件或用外部工具检查时，使用 `export region`。它导出主层方块及状态，产物为分片 `.mcstructure` 和记录半开世界坐标的 `manifest.json`。只有一个已注册目标时可以省略目标名。
+
+```powershell
+bewright export region dev --only east --output artifacts/east-structure
+bewright export region dev --min '100,-60,200' --max '120,-40,220' --output artifacts/detail
+```
+
 ## `bewright pack --layout FILE`
 
 从地图清单生成可编辑的源码 ZIP。包内的 `layout.json` 保留位置、旋转、参数、出生点和种子，并使用相对于包根的建筑路径。`source/` 保留建筑目录、目录内的资源，以及入口递归引用的本地 ESM 模块路径。`README.md` 给出重建命令。

@@ -16,6 +16,7 @@ const WORKSPACE_IGNORE = [
   '/cache/',
   '/worlds/',
   '/blockwright.local.json',
+  '/.bewright/',
   '',
 ].join('\n');
 

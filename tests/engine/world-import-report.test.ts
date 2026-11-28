@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { normalizePlacementIds } from '../../src/content/world-layout.js';
 import { comparePreservation } from '../../src/targets/bedrock/preserve.js';
 import { backupWorld } from '../../src/targets/bedrock/world.js';
@@ -36,7 +36,7 @@ test('backups can be directed outside the world parent', async (t) => {
   await writeFile(join(world, 'level.dat'), 'level');
   await writeFile(join(world, 'db', 'CURRENT'), 'MANIFEST-000001\n');
   const target = await backupWorld(world, backups);
-  assert.ok(target.startsWith(backups + '/'));
+  assert.equal(dirname(target), backups);
   assert.equal(await readFile(join(target, 'level.dat'), 'utf8'), 'level');
   assert.equal(await readFile(join(target, 'db', 'CURRENT'), 'utf8'), 'MANIFEST-000001\n');
 });

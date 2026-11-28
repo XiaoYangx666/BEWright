@@ -30,6 +30,9 @@ type DirectWorldPlacement = Omit<WorldPlacement, 'structure'> & {
   reportOverwrites?: boolean;
   /** Read the committed chunks back and compare them with the payload. */
   verify?: boolean;
+  /** Sparse snapshot of the cells to be written, checked under the write handle. */
+  expectedFile?: string;
+  backupDestination?: string;
 };
 
 export type WorldPlacementResult = {
@@ -78,10 +81,14 @@ function timestamp() {
     .replace(/\.\d{3}Z$/, 'Z');
 }
 
-export async function backupWorld(world: string, directory?: string) {
+export async function nextWorldBackupPath(world: string, directory?: string) {
   const parent = directory ? resolve(directory) : dirname(world);
   await mkdir(parent, { recursive: true });
-  const target = join(parent, `${basename(world)}.blockwright-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
+  return join(parent, `${basename(world)}.blockwright-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
+}
+
+export async function backupWorld(world: string, directory?: string) {
+  const target = await nextWorldBackupPath(world, directory);
   // `cp` creates the destination itself: pre-creating it made every backup of an
   // existing world fail with EEXIST under `errorOnExist`.
   await cp(world, target, { recursive: true, force: false, errorOnExist: true });
@@ -151,7 +158,7 @@ type DirectStructurePlan = {
  * to be known before the records are produced (the protocol prefixes them), and
  * knowing it up front is what lets a caller preallocate instead of growing.
  */
-function directStructurePlan(structure: Structure, region: Box): DirectStructurePlan {
+function directStructurePlan(structure: Structure, region: Box, validate = true): DirectStructurePlan {
   const ids = new Set<number>();
   let blocks = 0;
   structure.forEach((_x, _y, _z, id) => {
@@ -162,7 +169,7 @@ function directStructurePlan(structure: Structure, region: Box): DirectStructure
   const palette = orderedIds.map((id) => {
     const state = structure.palette[id];
     if (!state) throw new Error(`Missing palette state ${id}`);
-    validateBlockState(state);
+    if (validate) validateBlockState(state);
     return paletteEntry(state);
   });
   const size = region.max.map((value, axis) => value - region.min[axis]) as [number, number, number];
@@ -236,13 +243,13 @@ export type DirectStructureStream = Readonly<{
 export function directStructureStream(
   structure: Structure,
   region: Box,
-  options: { recordsPerChunk?: number } = {},
+  options: { recordsPerChunk?: number; worldSnapshot?: boolean } = {},
 ): DirectStructureStream {
   assertBox(region);
   const recordsPerChunk = options.recordsPerChunk ?? DIRECT_STRUCTURE_RECORDS;
   if (!Number.isSafeInteger(recordsPerChunk) || recordsPerChunk < 1)
     throw new Error(`recordsPerChunk must be a positive integer: ${recordsPerChunk}`);
-  const plan = directStructurePlan(structure, region);
+  const plan = directStructurePlan(structure, region, !options.worldSnapshot);
   return {
     blocks: plan.blocks,
     chunks: (function* () {
@@ -376,11 +383,13 @@ async function placeDirectStructureInWorld(
   // Planning (palette, block count, header) happens here, before the backup and
   // the spawn; the records are produced lazily as the sidecar drains stdin.
   const payload = directStructureStream(structure, region);
-  const backupPath = options.backup === false ? undefined : await backupWorld(world, options.backupDir);
+  const backupPath = options.backupDestination ?? (options.backup === false ? undefined : await backupWorld(world, options.backupDir));
   const args = placementArgs(options, world, ['--direct-stdin']);
   if (options.skipEmptyChunks) args.push('--skip-empty-chunks');
   if (options.reportOverwrites) args.push('--report-overwrites');
   if (options.verify) args.push('--verify');
+  if (options.expectedFile) args.push('--expect', options.expectedFile);
+  if (options.backupDestination) args.push('--backup-to', options.backupDestination);
   const result = await runSidecarJson<WorldWriterReport>(binary, args, 'World writer', payload.chunks);
   return {
     backupPath,

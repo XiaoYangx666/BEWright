@@ -118,6 +118,7 @@ dependencies = [
  "bedrock-world",
  "flate2",
  "indexmap",
+ "libc",
  "serde",
  "serde_json",
 ]

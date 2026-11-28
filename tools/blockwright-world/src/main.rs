@@ -6,13 +6,14 @@ use bedrock_world::{
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    env,
-    io::{self, Read},
+    env, fs,
+    io::{self, BufReader, Read},
     path::PathBuf,
     process,
 };
 
 mod direct;
+mod world_lock;
 
 /// World-write counts reported to the CLI, identical for both write paths.
 struct Outcome {
@@ -31,6 +32,8 @@ struct Args {
     analyze: bool,
     report_overwrites: bool,
     verify: bool,
+    expected: Option<PathBuf>,
+    backup_to: Option<PathBuf>,
     skip_empty_chunks: bool,
     x: i32,
     y: i32,
@@ -43,7 +46,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks] [--analyze] [--report-overwrites] [--verify]"
+        "usage: blockwright-world place --world PATH (--structure FILE | --direct-stdin) --x N --y N --z N [--dimension N] [--rotation 0|90|180|270] [--mirror-x] [--mirror-z] [--skip-empty-chunks] [--analyze] [--report-overwrites] [--verify] [--expect FILE [--backup-to PATH]]"
     );
     process::exit(2);
 }
@@ -59,6 +62,8 @@ fn parse() -> Args {
     let mut analyze = false;
     let mut report_overwrites = false;
     let mut verify = false;
+    let mut expected = None;
+    let mut backup_to = None;
     let mut skip_empty_chunks = false;
     let (mut x, mut y, mut z, mut dimension) = (None, None, None, 0);
     let mut rotation = McStructureRotation::None;
@@ -73,6 +78,8 @@ fn parse() -> Args {
             "--analyze" => analyze = true,
             "--report-overwrites" => report_overwrites = true,
             "--verify" => verify = true,
+            "--expect" => expected = Some(PathBuf::from(value(&mut input))),
+            "--backup-to" => backup_to = Some(PathBuf::from(value(&mut input))),
             "--skip-empty-chunks" => skip_empty_chunks = true,
             "--x" => x = value(&mut input).parse().ok(),
             "--y" => y = value(&mut input).parse().ok(),
@@ -95,10 +102,13 @@ fn parse() -> Args {
     if direct_stdin == structure.is_some() {
         usage();
     }
-    if (analyze || report_overwrites || verify) && !direct_stdin {
+    if (analyze || report_overwrites || verify || expected.is_some()) && !direct_stdin {
         usage();
     }
-    if analyze && (report_overwrites || verify) {
+    if analyze && (report_overwrites || verify || expected.is_some()) {
+        usage();
+    }
+    if backup_to.is_some() && expected.is_none() {
         usage();
     }
     Args {
@@ -108,6 +118,8 @@ fn parse() -> Args {
         analyze,
         report_overwrites,
         verify,
+        expected,
+        backup_to,
         skip_empty_chunks,
         x: x.unwrap_or_else(|| usage()),
         y: y.unwrap_or_else(|| usage()),
@@ -257,7 +269,7 @@ fn run(args: Args) -> bedrock_world::Result<()> {
         && matches!(args.rotation, McStructureRotation::None)
         && !args.mirror_x
         && !args.mirror_z;
-    if args.skip_empty_chunks && !sparse {
+    if (args.skip_empty_chunks || args.expected.is_some()) && !sparse {
         usage();
     }
     // Parse (and validate) the payload before touching the world, so a malformed
@@ -276,13 +288,11 @@ fn run(args: Args) -> bedrock_world::Result<()> {
             args.structure.as_ref().expect("structure path"),
         )?)
     };
-    let world = BedrockWorld::open_blocking(
-        &args.world,
-        OpenOptions {
-            read_only: false,
-            ..OpenOptions::default()
-        },
-    )?;
+    let _world_lock = if args.analyze { None } else { Some(world_lock::lock_world(&args.world)?) };
+    let open = |read_only| BedrockWorld::open_blocking(
+        &args.world, OpenOptions { read_only, ..OpenOptions::default() }
+    );
+    let world = open(args.analyze || args.expected.is_some())?;
     let dimension = match args.dimension {
         0 => Dimension::Overworld,
         1 => Dimension::Nether,
@@ -300,6 +310,20 @@ fn run(args: Args) -> bedrock_world::Result<()> {
         println!("{}", json!({"ok":true,"analysis":analysis_json(&analysis)}));
         return Ok(());
     }
+    let world = if let Some(file) = &args.expected {
+        let file = fs::File::open(&file).map_err(|error| {
+            bedrock_world::BedrockWorldError::Validation(format!("cannot read {}: {error}", file.display()))
+        })?;
+        let mut expected = direct::Payload::read(BufReader::new(file))?;
+        direct::check_expected(&world, (args.x, args.y, args.z, dimension), &mut expected)?;
+        drop(world);
+        if let Some(path) = &args.backup_to {
+            world_lock::backup(&args.world, path)?;
+        }
+        open(false)?
+    } else {
+        world
+    };
     let guard = WriteGuard::confirmed(&args.world, "place Blockwright structure");
     let mut overwrites = None;
     let mut verification = None;
@@ -312,6 +336,7 @@ fn run(args: Args) -> bedrock_world::Result<()> {
                 initialize_empty_chunks: !args.skip_empty_chunks,
                 report_overwrites: args.report_overwrites,
                 verify: args.verify,
+                patch_existing: args.expected.is_some(),
             },
         )?;
         overwrites = result.overwrites.map(|analysis| analysis_json(&analysis));

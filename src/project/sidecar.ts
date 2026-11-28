@@ -3,13 +3,14 @@ import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { Writable } from 'node:stream';
+import type { Readable, Writable } from 'node:stream';
 import { TOOL_ROOT } from './context.js';
 
 /**
  * Single place for invoking the Rust sidecar binaries.
  * Every sidecar follows the same contract: optional binary stdin payload,
- * UTF-8 stdout/stderr, and a non-zero exit code on failure.
+ * UTF-8 diagnostics and a non-zero exit code on failure. Callers that request
+ * binary results consume stdout as a bounded stream instead.
  *
  * A payload may be an iterable of chunks rather than one buffer. Large payloads
  * (a 14M-block direct world write is 220 MB) are then produced and handed to the
@@ -42,12 +43,24 @@ export function requireSidecar(name: string, buildCommand = 'bewright sidecar bu
   return binary;
 }
 
-export function runSidecar(binary: string, args: string[], input?: SidecarInput): Promise<SidecarResult> {
+export function runSidecar(
+  binary: string,
+  args: string[],
+  input?: SidecarInput,
+  consumeStdout?: (stream: Readable) => Promise<void>,
+): Promise<SidecarResult> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(binary, args, { stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '',
       stderr = '';
-    child.stdout?.setEncoding('utf8').on('data', (chunk) => (stdout += chunk));
+    let outputFailure: unknown;
+    const consumed = consumeStdout
+      ? consumeStdout(child.stdout!).catch((error) => {
+          outputFailure = error;
+          child.kill();
+        })
+      : undefined;
+    if (!consumeStdout) child.stdout?.setEncoding('utf8').on('data', (chunk) => (stdout += chunk));
     child.stderr?.setEncoding('utf8').on('data', (chunk) => (stderr += chunk));
     child.on('error', reject);
     // A producer that throws mid-payload (an encoder bug) truncates the stream, so
@@ -55,18 +68,25 @@ export function runSidecar(binary: string, args: string[], input?: SidecarInput)
     // only the exit code the truncation caused.
     let feedFailure: unknown;
     child.on('close', (code) => {
-      if (feedFailure && code === 0)
-        reject(feedFailure instanceof Error ? feedFailure : new Error(String(feedFailure)));
-      else if (code === 0) resolvePromise({ stdout, stderr });
-      else {
-        const note = feedFailure
-          ? `; payload producer failed: ${feedFailure instanceof Error ? feedFailure.message : String(feedFailure)}`
-          : '';
-        reject(new Error(`${binary.split(/[\\/]/).at(-1)} exited ${code}: ${stderr.trim() || stdout.trim()}${note}`));
-      }
+      void Promise.resolve(consumed).then(() => {
+        if (outputFailure && !stderr.trim()) reject(outputFailure);
+        else if (feedFailure && code === 0)
+          reject(feedFailure instanceof Error ? feedFailure : new Error(String(feedFailure)));
+        else if (code === 0) resolvePromise({ stdout, stderr });
+        else {
+          const note =
+            feedFailure && !stderr.trim()
+              ? `; payload producer failed: ${feedFailure instanceof Error ? feedFailure.message : String(feedFailure)}`
+              : '';
+          reject(new Error(`${binary.split(/[\\/]/).at(-1)} exited ${code}: ${stderr.trim() || stdout.trim()}${note}`));
+        }
+      });
     });
     if (input && child.stdin) {
       const stdin = child.stdin;
+      stdin.on('error', (error) => {
+        feedFailure ??= error;
+      });
       void feed(stdin, input).catch((error) => {
         feedFailure = error;
         stdin.destroy();

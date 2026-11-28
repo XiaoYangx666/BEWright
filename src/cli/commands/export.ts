@@ -8,6 +8,7 @@ import { runBuild } from '../../content/pipeline.js';
 import { buildingOutputDir } from '../../content/output.js';
 import { parseMcstructureFormatVersion } from '../../targets/bedrock/mcstructure.js';
 import { buildingArgs, CONTENT_OPTION, PARAM_OPTION, contentOptions, parseTriple } from '../args.js';
+import { exportRegionCommand, REGION_EXPORT_HELP } from './deployment.js';
 
 export const EXPORT_HELP = `bewright export <building> --edition bedrock|java [options]
 
@@ -26,9 +27,15 @@ export const EXPORT_HELP = `bewright export <building> --edition bedrock|java [o
   --param k=v         building parameter override
   --report            save Bedrock build metadata
   --json              print machine-readable results
-  --no-check          skip the building's own check()`;
+  --no-check          skip the building's own check()
+
+Advanced save export:
+${REGION_EXPORT_HELP}`;
 
 export async function exportCommand(argv: string[]) {
+  if (argv[0] === 'region' && !argv.some((arg) => arg === '--edition' || arg.startsWith('--edition=')))
+    return exportRegionCommand(argv.slice(1));
+  if (argv.includes('--help')) return console.log(EXPORT_HELP);
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,

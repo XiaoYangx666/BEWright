@@ -17,6 +17,7 @@ tools/**/target/
 # 工作区生成的世界与机器本地配置
 /worlds/
 /blockwright.local.json
+/.bewright/
 /buildings/
 /catalog/
 

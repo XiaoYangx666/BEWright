@@ -94,6 +94,7 @@ export async function composeWorldLayout(
     skipAir: boolean;
     /** Off for one-shot imports: incremental preview bookkeeping is pure overhead. */
     meshVersions?: boolean;
+    allowEmpty?: boolean;
   },
 ) {
   const selected = new Set(options.only);
@@ -176,9 +177,9 @@ export async function composeWorldLayout(
       if (py + 1 > max[1]) max[1] = py + 1;
       if (pz + 1 > max[2]) max[2] = pz + 1;
     }, region);
-    results.push({ ...placement, building: definition.id, params, bounds, cells: placed, overlaps });
+    results.push({ ...placement, building: definition.id, params, bounds, offset, cells: placed, overlaps });
   }
-  if (!cells) throw new Error('Selected placements contain no blocks to write');
+  if (!cells && !options.allowEmpty) throw new Error('Selected placements contain no blocks to write');
   const bounds = { min, max };
   return { world, bounds, placements: results, cells, explicitAir };
 }

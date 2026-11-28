@@ -20,7 +20,7 @@
 use bedrock_world::{
     block_storage_index, BedrockWorld, BedrockWorldError, Biome2d, Biome3d, BlockPalette,
     BlockState, Chunk, ChunkKey, ChunkPos, ChunkRecord, ChunkRecordTag, ChunkVersion, Dimension,
-    McStructurePaletteEntry, NbtTag, NbtWriter, Result, SubChunk, SubChunkFormat,
+    McStructurePaletteEntry, NbtReader, NbtTag, NbtWriter, Result, SubChunk, SubChunkFormat,
     WorldStorageHandle, WorldTransaction,
 };
 use indexmap::IndexMap;
@@ -63,6 +63,7 @@ pub struct WriteOptions {
     pub initialize_empty_chunks: bool,
     pub report_overwrites: bool,
     pub verify: bool,
+    pub patch_existing: bool,
 }
 
 /// Header and palette of a `BLKWRDIR` payload, read before any world is opened so
@@ -163,6 +164,8 @@ struct ChunkBlocks {
     /// Cached once per chunk: legacy terrain makes `Chunk::get_block` the only
     /// source of truth below Y 128, and parsing it for every cell is expensive.
     legacy_terrain: Option<bool>,
+    /// A guarded deployment verifies properties as well as block names.
+    exact: bool,
 }
 
 impl Default for ChunkBlocks {
@@ -170,6 +173,7 @@ impl Default for ChunkBlocks {
         Self {
             subchunks: BTreeMap::new(),
             legacy_terrain: None,
+            exact: false,
         }
     }
 }
@@ -178,7 +182,7 @@ impl ChunkBlocks {
     /// Compare one cell without cloning its block state. The palette path hands
     /// out a borrowed state, so a matching cell costs no allocation at all; the
     /// name is only materialized for a differing block.
-    fn classify(&mut self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
+    fn classify(&mut self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &McStructurePaletteEntry) -> Result<Probe> {
         let subchunk_y = i8::try_from(y.div_euclid(16))
             .map_err(|_| BedrockWorldError::Validation("world y is not a subchunk index".into()))?;
         if !self.subchunks.contains_key(&subchunk_y) {
@@ -190,7 +194,7 @@ impl ChunkBlocks {
                 BedrockWorldError::Validation("world y is not a subchunk offset".into())
             })?;
             if let Some(state) = subchunk.block_state_at(x, local_y, z) {
-                return Ok(classify_name(&state.name, expected));
+                return Ok(self.classify_state(state, expected));
             }
             // A subchunk can also carry legacy ids; those need the full lookup.
             if subchunk.legacy_block_id_at(x, local_y, z).is_some() {
@@ -201,7 +205,7 @@ impl ChunkBlocks {
         // ruled out the cell is air: going through `get_block` here would build
         // an "unsupported chunk format" error for every empty cell.
         if !self.has_legacy_terrain(chunk, y)? {
-            return Ok(Probe::Empty);
+            return Ok(classify_name(AIR_BLOCK_NAME, &expected.name));
         }
         self.legacy_probe(chunk, x, y, z, expected)
     }
@@ -218,21 +222,29 @@ impl ChunkBlocks {
         Ok(known)
     }
 
-    fn legacy_probe(&self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &str) -> Result<Probe> {
+    fn classify_state(&self, state: &BlockState, expected: &McStructurePaletteEntry) -> Probe {
+        if self.exact && state.name == expected.name && !states_match(state, expected) {
+            Probe::Different(state.name.clone())
+        } else {
+            classify_name(&state.name, &expected.name)
+        }
+    }
+
+    fn legacy_probe(&self, chunk: &Chunk, x: u8, y: i32, z: u8, expected: &McStructurePaletteEntry) -> Result<Probe> {
         match chunk.get_block(
             x,
             i16::try_from(y)
                 .map_err(|_| BedrockWorldError::Validation("world y does not fit i16".into()))?,
             z,
         ) {
-            Ok(state) => Ok(classify_name(&state.name, expected)),
+            Ok(state) => Ok(self.classify_state(&state, expected)),
             Err(error)
                 if matches!(
                     error.kind(),
                     bedrock_world::BedrockWorldErrorKind::UnsupportedChunkFormat
                 ) =>
             {
-                Ok(Probe::Empty)
+                Ok(classify_name(AIR_BLOCK_NAME, &expected.name))
             }
             Err(error) => Err(error),
         }
@@ -266,7 +278,7 @@ fn compare_chunk(
             let local_y = u8::try_from(index % 16).unwrap_or(0);
             let world_y = i32::from(subchunk_y) * 16 + i32::from(local_y);
             stats.cells += 1;
-            match blocks.classify(chunk, local_x, world_y, local_z, &entry.name)? {
+            match blocks.classify(chunk, local_x, world_y, local_z, entry)? {
                 Probe::Matched => stats.matched += 1,
                 Probe::Different(name) => {
                     stats.different += 1;
@@ -309,6 +321,18 @@ fn classify_name(current: &str, expected: &str) -> Probe {
     }
 }
 
+fn states_match(state: &BlockState, expected: &McStructurePaletteEntry) -> bool {
+    state.states.len() == expected.states.len() && state.states.iter().all(|(key, value)| {
+        expected.states.get(key).is_some_and(|other| {
+            value == other || match (value, other) {
+                (NbtTag::Byte(a), NbtTag::Int(b)) => i32::from(*a) == *b,
+                (NbtTag::Short(a), NbtTag::Int(b)) => i32::from(*a) == *b,
+                _ => false,
+            }
+        })
+    })
+}
+
 /// Compares every cell of a direct payload with the target world without writing.
 ///
 /// This keeps the read-back proportional to the actual placed cells: the old
@@ -338,7 +362,7 @@ pub fn analyze<S: WorldStorageHandle>(
                 "direct palette index is out of range".into(),
             ));
         }
-        let expected = payload.palette[palette_index].name.clone();
+        let expected = &payload.palette[palette_index];
         let world_x = origin_x
             .checked_add(x)
             .ok_or_else(|| BedrockWorldError::Validation("world x overflowed".into()))?;
@@ -363,7 +387,7 @@ pub fn analyze<S: WorldStorageHandle>(
             world_x.rem_euclid(16) as u8,
             world_y,
             world_z.rem_euclid(16) as u8,
-            expected.as_str(),
+            expected,
         )?;
         analysis.cells += 1;
         match probe {
@@ -376,7 +400,7 @@ pub fn analyze<S: WorldStorageHandle>(
                         x: world_x,
                         y: world_y,
                         z: world_z,
-                        expected,
+                        expected: expected.name.clone(),
                         current: Some(name),
                     });
                 }
@@ -388,7 +412,7 @@ pub fn analyze<S: WorldStorageHandle>(
                         x: world_x,
                         y: world_y,
                         z: world_z,
-                        expected,
+                        expected: expected.name.clone(),
                         current: None,
                     });
                 }
@@ -396,6 +420,89 @@ pub fn analyze<S: WorldStorageHandle>(
         }
     }
     Ok(analysis)
+}
+
+/// Validate the read-only deployment plan after acquiring the writable DB handle.
+/// Secondary blocks and block entities require their own editing semantics.
+pub fn check_expected<S: WorldStorageHandle>(
+    world: &BedrockWorld<S>,
+    (origin_x, origin_y, origin_z, dimension): (i32, i32, i32, Dimension),
+    payload: &mut Payload<impl Read>,
+) -> Result<()> {
+    let mut current = None;
+    let mut subchunks = BTreeMap::new();
+    let mut entities = HashSet::new();
+    for _ in 0..payload.reader.u32()? {
+        let mut coordinate = |origin: i32, size: i32| {
+            let offset = payload.reader.u32()?;
+            i32::try_from(offset).ok().filter(|value| *value < size)
+                .and_then(|value| origin.checked_add(value))
+                .ok_or_else(|| BedrockWorldError::Validation("invalid expected cell coordinate".into()))
+        };
+        let x = coordinate(origin_x, payload.size[0])?;
+        let y = coordinate(origin_y, payload.size[1])?;
+        let z = coordinate(origin_z, payload.size[2])?;
+        let expected = payload.palette.get(payload.reader.u32()? as usize)
+            .ok_or_else(|| BedrockWorldError::Validation("invalid expected cell palette index".into()))?;
+        let pos = ChunkPos { x: x.div_euclid(16), z: z.div_euclid(16), dimension };
+        if current.as_ref().map(|(pos, _)| *pos) != Some(pos) {
+            let chunk = world.get_chunk_blocking(pos)?;
+            subchunks.clear();
+            entities.clear();
+            for record in &chunk.records {
+                if record.key.tag == ChunkRecordTag::LegacyTerrain {
+                    return Err(BedrockWorldError::Validation("deployment requires modern paletted chunks".into()));
+                }
+                if record.key.tag != ChunkRecordTag::BlockEntity { continue; }
+                let mut bytes = record.value.as_ref();
+                while !bytes.is_empty() {
+                    let (nbt, consumed) = NbtReader::new(bytes).parse_root_with_consumed()?;
+                    let coordinates = match nbt {
+                        NbtTag::Compound(values) => match (values.get("x"), values.get("y"), values.get("z")) {
+                            (Some(NbtTag::Int(x)), Some(NbtTag::Int(y)), Some(NbtTag::Int(z))) => Some((*x, *y, *z)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    entities.insert(coordinates.ok_or_else(|| BedrockWorldError::Validation("block entity has no position".into()))?);
+                    bytes = &bytes[consumed..];
+                }
+            }
+            current = Some((pos, chunk));
+        }
+        let (_, chunk) = current.as_ref().expect("current chunk");
+        if entities.contains(&(x, y, z)) {
+            return Err(BedrockWorldError::Validation(format!("deployment would replace a block entity at {x},{y},{z}")));
+        }
+        let sub_y = i8::try_from(y.div_euclid(16))
+            .map_err(|_| BedrockWorldError::Validation("invalid expected subchunk height".into()))?;
+        if let std::collections::btree_map::Entry::Vacant(slot) = subchunks.entry(sub_y) {
+            slot.insert(chunk.get_subchunk(sub_y)?);
+        }
+        let (lx, ly, lz) = (x.rem_euclid(16) as u8, y.rem_euclid(16) as u8, z.rem_euclid(16) as u8);
+        let actual = match &subchunks[&sub_y] {
+            Some(subchunk) => {
+                let SubChunkFormat::Paletted { storages, .. } = &subchunk.format else {
+                    return Err(BedrockWorldError::Validation("deployment requires modern paletted subchunks".into()));
+                };
+                if storages.len() > 2 {
+                    return Err(BedrockWorldError::Validation("cannot merge a subchunk with more than two layers".into()));
+                }
+                if storages.iter().skip(1).any(|layer| layer.block_state_at(lx, ly, lz).is_some_and(|s| s.name != AIR_BLOCK_NAME)) {
+                    return Err(BedrockWorldError::Validation(format!("deployment would replace a secondary block at {x},{y},{z}")));
+                }
+                storages.first().and_then(|layer| layer.block_state_at(lx, ly, lz))
+            }
+            None => None,
+        };
+        let matches = actual.map_or(expected.name == AIR_BLOCK_NAME, |state| {
+            state.name == expected.name && states_match(state, expected)
+        });
+        if !matches {
+            return Err(BedrockWorldError::Validation(format!("world changed after deployment planning at {x},{y},{z}")));
+        }
+    }
+    Ok(())
 }
 
 /// Writes every record of the payload, one chunk at a time.
@@ -473,7 +580,7 @@ pub fn write<S: WorldStorageHandle>(
                     previous,
                     &accumulator,
                     &palette,
-                    (layer_min, layer_max),
+                    (!options.patch_existing).then_some((layer_min, layer_max)),
                     &empty_layer,
                     &mut affected_chunks,
                     &mut overwrites,
@@ -491,6 +598,7 @@ pub fn write<S: WorldStorageHandle>(
                         &mut pending,
                         &palette,
                         &mut verification,
+                        options.patch_existing,
                     )?;
                 }
             }
@@ -512,7 +620,7 @@ pub fn write<S: WorldStorageHandle>(
             previous,
             &accumulator,
             &palette,
-            (layer_min, layer_max),
+            (!options.patch_existing).then_some((layer_min, layer_max)),
             &empty_layer,
             &mut affected_chunks,
             &mut overwrites,
@@ -542,7 +650,7 @@ pub fn write<S: WorldStorageHandle>(
                     },
                     &ChunkAccumulator::default(),
                     &palette,
-                    (layer_min, layer_max),
+                    Some((layer_min, layer_max)),
                     &empty_layer,
                     &mut affected_chunks,
                     &mut overwrites,
@@ -554,6 +662,7 @@ pub fn write<S: WorldStorageHandle>(
                         &mut pending,
                         &palette,
                         &mut verification,
+                        options.patch_existing,
                     )?;
                 }
             }
@@ -565,6 +674,7 @@ pub fn write<S: WorldStorageHandle>(
         &mut pending,
         &palette,
         &mut verification,
+        options.patch_existing,
     )?;
 
     let chunk_version = affected_chunks
@@ -605,6 +715,7 @@ fn commit_batch<'a, S: WorldStorageHandle>(
     pending: &mut Vec<(ChunkPos, ChunkAccumulator)>,
     palette: &[McStructurePaletteEntry],
     verification: &mut Option<Analysis>,
+    exact: bool,
 ) -> Result<()> {
     transaction
         .take()
@@ -619,7 +730,7 @@ fn commit_batch<'a, S: WorldStorageHandle>(
                 &accumulator,
                 palette,
                 stats,
-                &mut ChunkBlocks::default(),
+                &mut ChunkBlocks { exact, ..ChunkBlocks::default() },
             )?;
         }
     } else {
@@ -673,7 +784,7 @@ fn flush_chunk<S: WorldStorageHandle>(
     pos: ChunkPos,
     accumulator: &ChunkAccumulator,
     palette: &[McStructurePaletteEntry],
-    layers: (i8, i8),
+    layers: Option<(i8, i8)>,
     empty_layer: &[i32],
     affected_chunks: &mut Vec<ChunkPos>,
     overwrites: &mut Option<Analysis>,
@@ -690,7 +801,11 @@ fn flush_chunk<S: WorldStorageHandle>(
             &mut ChunkBlocks::default(),
         )?;
     }
-    for subchunk_y in layers.0..=layers.1 {
+    let layer_indices = match layers {
+        Some((min, max)) => (min..=max).collect::<Vec<_>>(),
+        None => accumulator.layers.keys().copied().collect(),
+    };
+    for subchunk_y in layer_indices {
         let layer = accumulator
             .layers
             .get(&subchunk_y)

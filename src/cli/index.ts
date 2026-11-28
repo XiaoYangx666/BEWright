@@ -24,6 +24,9 @@ const COMMANDS: Record<string, CommandSpec> = {
   preview: { load: () => import('./commands/preview.js'), run: 'previewCommand', help: 'PREVIEW_HELP' },
   export: { load: () => import('./commands/export.js'), run: 'exportCommand', help: 'EXPORT_HELP' },
   import: { load: () => import('./commands/import.js'), run: 'importCommand', help: 'IMPORT_HELP' },
+  target: { load: () => import('./commands/deployment.js'), run: 'targetCommand', help: 'TARGET_HELP' },
+  deploy: { load: () => import('./commands/deployment.js'), run: 'deployCommand', help: 'DEPLOY_HELP' },
+  diff: { load: () => import('./commands/deployment.js'), run: 'diffCommand', help: 'DIFF_HELP' },
   pack: { load: () => import('./commands/pack.js'), run: 'packCommand', help: 'PACK_HELP' },
   blocks: { load: () => import('./commands/blocks.js'), run: 'blocksCommand', help: 'BLOCKS_HELP' },
   registry: { load: () => import('./commands/registry.js'), run: 'registryCommand', help: 'REGISTRY_HELP' },
@@ -42,6 +45,9 @@ Usage: bewright <command> [options]
   preview   render a headless PNG of a building or component
   export    export to Bedrock .mcstructure or a Java Anvil world
   import    place a building or layout into a Bedrock world (or export Java)
+  target    register a reusable Bedrock layout and save
+  deploy    apply source changes and preserve unrelated edits in the save
+  diff      compare current sources with a registered Bedrock save
   pack      create an editable layout and building source .zip
   blocks    search the pinned Bedrock block registry
   registry  regenerate or verify the generated registry data
