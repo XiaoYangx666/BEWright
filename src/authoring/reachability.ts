@@ -89,7 +89,12 @@ export function lanternSupportErrors(world: Structure, bounds?: Box, label = 'la
   return issues;
 }
 
-export type StandardIssueOptions = Readonly<{ minOccupied?: number; maxIssues?: number; label?: string }>;
+export type StandardIssueOptions = Readonly<{
+  minOccupied?: number;
+  maxIssues?: number;
+  label?: string;
+  previewPlaceholderBlocks?: readonly string[];
+}>;
 
 /**
  * 标准模型诊断，返回统一诊断对象。
@@ -113,8 +118,10 @@ export function modelIssues(world: Structure, bounds: Box, options: StandardIssu
     const state = world.palette[id]!;
     if (materials[state.name.replace('minecraft:', '')]!.geometry === 'placeholder') {
       const message = `${state.name} 没有确认的视觉几何`;
-      if (!issues.some((issue) => issue.message.includes(message)))
-        issues.push(fromMessage(message, 'model.placeholder-geometry', { kind: 'geometry', id: state.name }));
+      if (!issues.some((issue) => issue.message.includes(message))) {
+        const issue = fromMessage(message, 'model.placeholder-geometry', { kind: 'geometry', id: state.name });
+        issues.push(options.previewPlaceholderBlocks?.includes(state.name) ? { ...issue, severity: 'warning' } : issue);
+      }
     }
     if (state.name === 'minecraft:lantern') {
       const hanging = state.states.hanging === true;

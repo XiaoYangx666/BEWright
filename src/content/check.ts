@@ -84,11 +84,12 @@ export function severityFromError(error: unknown): Severity {
 export function modelDiagnostics(
   world: import('../core/structure.js').Structure,
   bounds: Box,
-  options: Readonly<{ minOccupied?: number; label?: string }> = {},
+  options: Readonly<{ minOccupied?: number; label?: string; previewPlaceholderBlocks?: readonly string[] }> = {},
 ): Diagnostic[] {
   return modelIssues(world, bounds, {
     ...(options.minOccupied === undefined ? {} : { minOccupied: options.minOccupied }),
     ...(options.label ? { label: options.label } : {}),
+    ...(options.previewPlaceholderBlocks ? { previewPlaceholderBlocks: options.previewPlaceholderBlocks } : {}),
   });
 }
 
@@ -120,6 +121,7 @@ export function generateModel(
   const diagnostics = modelDiagnostics(world, bounds, {
     ...(request.minOccupied === undefined ? {} : { minOccupied: request.minOccupied }),
     ...(request.label ? { label: request.label } : {}),
+    ...(definition.previewPlaceholderBlocks ? { previewPlaceholderBlocks: definition.previewPlaceholderBlocks } : {}),
   });
   return {
     model,

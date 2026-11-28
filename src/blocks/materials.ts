@@ -1,5 +1,5 @@
 import { type State } from '../core/structure.js';
-import { registryBlocks, registryBlock, minecraftBlock, type RegistryBlock } from './registry.js';
+import { registryBlocks, worldReadbackBlocks, registryBlock, minecraftBlock, type RegistryBlock } from './registry.js';
 export type GeometryKind =
   | 'cube'
   | 'air'
@@ -312,7 +312,7 @@ const FAMILY_SUFFIXES = [
 ] as const;
 
 const baseMaterials: Record<string, Material> = Object.fromEntries(
-  registryBlocks.map((b) => {
+  [...registryBlocks, ...worldReadbackBlocks.filter(({ name }) => !registryBlocks.some((b) => b.name === name))].map((b) => {
     const old = curated[b.name];
     const family = familyGeometry(b);
     const geometry = old?.geometry ?? family ?? (ordinaryCube(b.name) ? 'cube' : 'placeholder');

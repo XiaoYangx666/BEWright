@@ -147,6 +147,8 @@ export type BuildingDefinition = Readonly<{
   artifacts?: string;
   /** Mesh cache directory override, relative to the project root. */
   cache?: string;
+  /** Registered blocks allowed to use placeholder preview geometry, with a diagnostic warning. */
+  previewPlaceholderBlocks?: readonly string[];
   /** Optional scene-specific invariants, run by `bewright build` / `bewright check` and the content tests. */
   check?: (context: BuildingCheckContext) => BuildingCheckResult | Promise<BuildingCheckResult>;
 }>;

@@ -77,6 +77,27 @@ for (const compact of raw.blocks) {
   valid.set(b.name, new Set(b.variants.map(stateKey)));
 }
 export const registryBlocks: readonly RegistryBlock[] = Object.freeze([...entries.values()]);
+
+// States verified by direct readback from a newer Bedrock save. Keep the pinned registry inventory separate.
+const redWoolSlabBottom = Object.freeze({ 'minecraft:vertical_half': 'bottom' });
+export const worldReadbackBlocks: readonly RegistryBlock[] = Object.freeze([
+  Object.freeze({
+    name: 'red_wool_slab',
+    defaultStates: redWoolSlabBottom,
+    variants: Object.freeze([redWoolSlabBottom]),
+    transparent: true,
+    filterLight: 0,
+    emitLight: 0,
+    boundingBox: 'block',
+    uniformFullCollision: false,
+    cubeLike: false,
+  }),
+]);
+for (const b of worldReadbackBlocks) {
+  if (entries.has(b.name)) continue;
+  entries.set(b.name, b);
+  valid.set(b.name, new Set(b.variants.map(stateKey)));
+}
 export function registryBlock(name: string): RegistryBlock {
   const key = name.replace(/^minecraft:/, '');
   const b = entries.get(key);
